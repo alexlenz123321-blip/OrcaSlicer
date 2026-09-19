@@ -1,0 +1,24 @@
+name: Build Spoolman Profile Link for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spoolman-profile-link
+    paths:
+      - src/slic3r/GUI/Plater.cpp
+      - .github/workflows/build-spoolman-windows.yml
+
+concurrency:
+  group: spoolman-profile-link-windows
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-2022
+      arch: x64
+      build-deps-only: false
+    secrets: inherit
