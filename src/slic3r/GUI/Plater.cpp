@@ -670,7 +670,7 @@ Preset* resolve_filament_preset(PresetBundle* preset_bundle,
     };
 
     for (auto& preset : preset_bundle->filaments) {
-        if (!preset.is_compatible || !preset.is_system)
+        if (!preset.is_compatible)
             continue;
 
         std::string base = extract_base_filament_name(preset.name);
