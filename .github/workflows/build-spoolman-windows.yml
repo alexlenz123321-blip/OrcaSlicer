@@ -1,13 +1,10 @@
-name: Build Spoolman Profile Link for Windows
+name: Build Snapmaker Orca Spoolman Edition
 
 on:
   workflow_dispatch:
   push:
     branches:
       - spoolman-profile-link
-    paths:
-      - src/slic3r/GUI/Plater.cpp
-      - .github/workflows/build-spoolman-windows.yml
 
 concurrency:
   group: spoolman-profile-link-windows

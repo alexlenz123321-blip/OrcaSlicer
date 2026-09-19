@@ -25,10 +25,12 @@
 #include <wx/filedlg.h>
 #include <iomanip>
 #include <sstream>
+#include <cctype>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include "libslic3r/libslic3r.h"
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
@@ -53,6 +55,8 @@
 #include "BedShapeDialog.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "NotificationManager.hpp"
+#include "slic3r/Utils/Http.hpp"
+#include <nlohmann/json.hpp>
 
 #include "BedShapeDialog.hpp"
 // #include "BonjourDialog.hpp"
@@ -129,6 +133,156 @@ static void validate_filament_hot_bed_nozzle_relation(wxWindow* parent)
         (void)is_noz_warn;
     }
 }
+
+namespace {
+
+struct SpoolmanHttpResult {
+    std::string body;
+    std::string error;
+    unsigned    status { 0 };
+};
+
+static std::string spoolman_api_base(std::string url)
+{
+    while (!url.empty() && url.back() == '/')
+        url.pop_back();
+    return url + "/api/v1";
+}
+
+static SpoolmanHttpResult spoolman_request(const std::string& method, const std::string& url,
+                                           const std::string& body = {})
+{
+    SpoolmanHttpResult result;
+    auto configure = [&result, &body](Http& http) {
+        http.timeout_connect(3)
+            .timeout_max(8)
+            .header("Content-Type", "application/json")
+            .on_complete([&result](std::string response, unsigned status) {
+                result.body = std::move(response);
+                result.status = status;
+            })
+            .on_error([&result](std::string response, std::string error, unsigned status) {
+                result.body = std::move(response);
+                result.error = std::move(error);
+                result.status = status;
+            });
+        if (!body.empty())
+            http.set_post_body(body);
+        http.perform_sync();
+    };
+
+    if (method == "GET") {
+        auto http = Http::get(url);
+        configure(http);
+    } else if (method == "POST") {
+        auto http = Http::post(url);
+        configure(http);
+    } else {
+        auto http = Http::patch(url);
+        configure(http);
+    }
+    return result;
+}
+
+static bool ensure_spoolman_filament_field(const std::string& api, const std::string& key,
+                                           const std::string& name, std::string& error)
+{
+    const auto fields = spoolman_request("GET", api + "/field/filament");
+    if (fields.status != 200) {
+        error = "Could not read Spoolman filament fields (HTTP " + std::to_string(fields.status) + ").";
+        return false;
+    }
+
+    try {
+        for (const auto& field : nlohmann::json::parse(fields.body)) {
+            if (field.value("key", std::string()) == key)
+                return true;
+        }
+    } catch (const std::exception& e) {
+        error = std::string("Invalid response from Spoolman: ") + e.what();
+        return false;
+    }
+
+    nlohmann::json payload = {
+        {"name", name}, {"field_type", "text"}, {"order", 10}, {"default_value", "\"\""}
+    };
+    const auto created = spoolman_request("POST", api + "/field/filament/" + key, payload.dump());
+    if (created.status != 200 && created.status != 201 && created.status != 409) {
+        error = "Could not create Spoolman field '" + key + "' (HTTP " + std::to_string(created.status) + ").";
+        return false;
+    }
+    return true;
+}
+
+static void sync_filament_profile_to_spoolman(wxWindow* parent, const Preset& preset)
+{
+    const std::string url = preset.config.opt_string("spoolman_url", 0u);
+    const std::string filament_id = preset.config.opt_string("spoolman_filament_id", 0u);
+    if (url.empty() || filament_id.empty())
+        return;
+    if (!std::all_of(filament_id.begin(), filament_id.end(), [](unsigned char c) { return std::isdigit(c); })) {
+        MessageDialog(parent, _L("The Spoolman filament ID must contain digits only. The Orca profile was saved locally, but the Spoolman link was not changed."),
+                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    const std::string api = spoolman_api_base(url);
+    const auto filament = spoolman_request("GET", api + "/filament/" + filament_id);
+    if (filament.status != 200) {
+        MessageDialog(parent, wxString::Format(_L("Spoolman filament %s could not be loaded (HTTP %u). The Orca profile was saved locally."), wxString::FromUTF8(filament_id), filament.status),
+                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    try {
+        nlohmann::json data = nlohmann::json::parse(filament.body);
+        const std::string vendor = data.contains("vendor") && data["vendor"].is_object()
+            ? data["vendor"].value("name", std::string("Generic")) : std::string("Generic");
+        const std::string material = data.value("material", std::string());
+        std::string base_name = preset.name.substr(0, preset.name.find('@'));
+        boost::algorithm::trim(base_name);
+        const std::string prefix = vendor + " " + material;
+        if (!boost::algorithm::istarts_with(base_name, prefix)) {
+            MessageDialog(parent, wxString::Format(_L("The profile name must start with '%s' to link it to this Spoolman filament. The Orca profile was saved locally."), wxString::FromUTF8(prefix)),
+                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+        std::string variant = base_name.substr(prefix.size());
+        boost::algorithm::trim(variant);
+        if (variant.empty()) {
+            MessageDialog(parent, _L("The profile name needs a variant after vendor and material, for example 'Basic Black'. The Orca profile was saved locally."),
+                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+
+        std::string field_error;
+        if (!ensure_spoolman_filament_field(api, "orca_profile", "Snapmaker Orca profile", field_error) ||
+            !ensure_spoolman_filament_field(api, "variant", "Variant", field_error)) {
+            MessageDialog(parent, wxString::FromUTF8(field_error), _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+
+        nlohmann::json extra = nlohmann::json::object();
+        if (data.contains("extra") && data["extra"].is_object())
+            extra = data["extra"];
+        extra["orca_profile"] = nlohmann::json(preset.name).dump();
+        extra["variant"] = nlohmann::json(variant).dump();
+        const auto updated = spoolman_request("PATCH", api + "/filament/" + filament_id,
+                                              nlohmann::json{{"extra", extra}}.dump());
+        if (updated.status != 200) {
+            MessageDialog(parent, wxString::Format(_L("Spoolman rejected the profile link (HTTP %u). The Orca profile was saved locally."), updated.status),
+                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+        BOOST_LOG_TRIVIAL(info) << "Spoolman profile link saved: filament=" << filament_id
+                                << " profile=" << preset.name;
+    } catch (const std::exception& e) {
+        MessageDialog(parent, wxString::Format(_L("Spoolman returned invalid data: %s. The Orca profile was saved locally."), wxString::FromUTF8(e.what())),
+                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
+    }
+}
+
+} // namespace
 
 void Tab::Highlighter::set_timer_owner(wxEvtHandler* owner, int timerid/* = wxID_ANY*/)
 {
@@ -3720,6 +3874,9 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_shrink");
         optgroup->append_single_option_line("filament_shrinkage_compensation_z");
         optgroup->append_single_option_line("filament_cost");
+        auto spoolman_group = page->new_optgroup(L("Spoolman profile link"), L"param_information");
+        spoolman_group->append_single_option_line("spoolman_url");
+        spoolman_group->append_single_option_line("spoolman_filament_id");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
         // filament_is_high_temperature is controlled by preset data, not user-facing
@@ -6230,6 +6387,9 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         BOOST_LOG_TRIVIAL(info) << "sync_preset: create preset = " << new_preset->name;
     }
     new_preset->save_info();
+
+    if (m_type == Preset::TYPE_FILAMENT)
+        sync_filament_profile_to_spoolman(m_parent, *new_preset);
 
     // Mark the print & filament enabled if they are compatible with the currently selected preset.
     // If saving the preset changes compatibility with other presets, keep the now incompatible dependent presets selected, however with a "red flag" icon showing that they are no more compatible.

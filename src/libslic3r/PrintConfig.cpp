@@ -1,8926 +1,4330 @@
-#include "PrintConfig.hpp"
-#include "ClipperUtils.hpp"
-#include "Config.hpp"
-#include "I18N.hpp"
-#include "format.hpp"
-
-#include "GCode/Thumbnails.hpp"
-#include <set>
-#include <boost/algorithm/string/replace.hpp>
-#include <boost/algorithm/string/case_conv.hpp>
-#include <boost/format.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/log/trivial.hpp>
-#include <boost/thread.hpp>
-#include <float.h>
-
-namespace {
-std::set<std::string> SplitStringAndRemoveDuplicateElement(const std::string &str, const std::string &separator)
-{
-    std::set<std::string> result;
-    if (str.empty()) return result;
-
-    std::string strs = str + separator;
-    size_t      pos;
-    size_t      size = strs.size();
-
-    for (int i = 0; i < size; ++i) {
-        pos = strs.find(separator, i);
-        if (pos < size) {
-            std::string sub_str = strs.substr(i, pos - i);
-            result.insert(sub_str);
-            i = pos + separator.size() - 1;
-        }
-    }
-
-    return result;
-}
-
-void ReplaceString(std::string &resource_str, const std::string &old_str, const std::string &new_str)
-{
-    std::string::size_type pos = 0;
-    while ((pos = resource_str.find(old_str, pos)) != std::string::npos) {
-        resource_str.replace(pos, old_str.length(), new_str);
-        pos += new_str.length(); //advance position to continue after replacement
-    }
-}
-}
-
-namespace Slic3r {
-
-//! macro used to mark string used at localization,
-//! return same string
-#define L(s) (s)
-#define _(s) Slic3r::I18N::translate(s)
-
-static t_config_enum_names enum_names_from_keys_map(const t_config_enum_values &enum_keys_map)
-{
-    t_config_enum_names names;
-    int cnt = 0;
-    for (const auto& kvp : enum_keys_map)
-        cnt = std::max(cnt, kvp.second);
-    cnt += 1;
-    names.assign(cnt, "");
-    for (const auto& kvp : enum_keys_map)
-        names[kvp.second] = kvp.first;
-    return names;
-}
-
-#define CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NAME) \
-    static t_config_enum_names s_keys_names_##NAME = enum_names_from_keys_map(s_keys_map_##NAME); \
-    template<> const t_config_enum_values& ConfigOptionEnum<NAME>::get_enum_values() { return s_keys_map_##NAME; } \
-    template<> const t_config_enum_names& ConfigOptionEnum<NAME>::get_enum_names() { return s_keys_names_##NAME; }
-
-static t_config_enum_values s_keys_map_PrinterTechnology {
-    { "FFF",            ptFFF },
-    { "SLA",            ptSLA }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterTechnology)
-
-static t_config_enum_values s_keys_map_PrintHostType {
-    { "prusalink",      htPrusaLink },
-    { "prusaconnect",   htPrusaConnect },
-    { "octoprint",      htOctoPrint },
-    { "crealityprint",  htCrealityPrint },
-    { "duet",           htDuet },
-    { "flashair",       htFlashAir },
-    { "astrobox",       htAstroBox },
-    { "repetier",       htRepetier },
-    { "mks",            htMKS },
-    { "esp3d",          htESP3D },
-    { "obico",          htObico },
-    { "flashforge",     htFlashforge },
-    { "simplyprint",    htSimplyPrint },
-    { "elegoolink",     htElegooLink }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintHostType)
-
-static t_config_enum_values s_keys_map_AuthorizationType {
-    { "key",            atKeyPassword },
-    { "user",           atUserPassword }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AuthorizationType)
-
-static t_config_enum_values s_keys_map_GCodeFlavor {
-    { "marlin",         gcfMarlinLegacy },
-    { "reprap",         gcfRepRapSprinter },
-    { "reprapfirmware", gcfRepRapFirmware },
-    { "repetier",       gcfRepetier },
-    { "teacup",         gcfTeacup },
-    { "makerware",      gcfMakerWare },
-    { "marlin2",        gcfMarlinFirmware },
-    { "sailfish",       gcfSailfish },
-    { "klipper",        gcfKlipper },
-    { "smoothie",       gcfSmoothie },
-    { "mach3",          gcfMach3 },
-    { "machinekit",     gcfMachinekit },
-    { "no-extrusion",   gcfNoExtrusion }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GCodeFlavor)
-
-static t_config_enum_values s_keys_map_FuzzySkinType {
-    { "none",           int(FuzzySkinType::None) },
-    { "external",       int(FuzzySkinType::External) },
-    { "all",            int(FuzzySkinType::All) },
-    { "allwalls",       int(FuzzySkinType::AllWalls)}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
-
-static t_config_enum_values s_keys_map_NoiseType {
-    { "classic",        int(NoiseType::Classic) },
-    { "perlin",         int(NoiseType::Perlin) },
-    { "billow",         int(NoiseType::Billow) },
-    { "ridgedmulti",    int(NoiseType::RidgedMulti) },
-    { "voronoi",        int(NoiseType::Voronoi) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NoiseType)
-
-static t_config_enum_values s_keys_map_FuzzySkinMode {
-    { "displacement",   int(FuzzySkinMode::Displacement) },
-    { "extrusion",      int(FuzzySkinMode::Extrusion) },
-    { "combined",       int(FuzzySkinMode::Combined)}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinMode)
-
-static t_config_enum_values s_keys_map_InfillPattern {
-    { "monotonic", ipMonotonic },
-    { "monotonicline", ipMonotonicLine },
-    { "rectilinear", ipRectilinear },
-    { "alignedrectilinear", ipAlignedRectilinear },
-    { "zigzag", ipZigZag },
-    { "crosszag", ipCrossZag },
-    { "lockedzag", ipLockedZag },
-    { "line", ipLine },
-    { "grid", ipGrid },
-    { "triangles", ipTriangles },
-    { "tri-hexagon", ipStars },
-    { "cubic", ipCubic },
-    { "adaptivecubic", ipAdaptiveCubic },
-    { "quartercubic", ipQuarterCubic },
-    { "supportcubic", ipSupportCubic },
-    { "lightning", ipLightning },
-    { "honeycomb", ipHoneycomb },
-    { "3dhoneycomb", ip3DHoneycomb },
-    { "lateral-honeycomb", ipLateralHoneycomb },
-    { "lateral-lattice", ipLateralLattice },
-    { "crosshatch", ipCrossHatch },
-    { "tpmsd", ipTpmsD },
-    { "tpmsfk", ipTpmsFK },
-    { "gyroid", ipGyroid },
-    { "concentric", ipConcentric },
-    { "hilbertcurve", ipHilbertCurve },
-    { "archimedeanchords", ipArchimedeanChords },
-    { "octagramspiral", ipOctagramSpiral }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
-
-static t_config_enum_values s_keys_map_IroningType {
-    { "no ironing",     int(IroningType::NoIroning) },
-    { "top",            int(IroningType::TopSurfaces) },
-    { "topmost",        int(IroningType::TopmostOnly) },
-    { "solid",          int(IroningType::AllSolid) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(IroningType)
-
-//BBS
-static t_config_enum_values s_keys_map_WallInfillOrder {
-    { "inner wall/outer wall/infill",     int(WallInfillOrder::InnerOuterInfill) },
-    { "outer wall/inner wall/infill",     int(WallInfillOrder::OuterInnerInfill) },
-    { "inner-outer-inner wall/infill",     int(WallInfillOrder::InnerOuterInnerInfill) },
-    { "infill/inner wall/outer wall",     int(WallInfillOrder::InfillInnerOuter) },
-    { "infill/outer wall/inner wall",     int(WallInfillOrder::InfillOuterInner) },
-    { "inner-outer-inner wall/infill",     int(WallInfillOrder::InnerOuterInnerInfill)}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallInfillOrder)
-
-//BBS
-static t_config_enum_values s_keys_map_WallSequence {
-    { "inner wall/outer wall",     int(WallSequence::InnerOuter) },
-    { "outer wall/inner wall",     int(WallSequence::OuterInner) },
-    { "inner-outer-inner wall",    int(WallSequence::InnerOuterInner)}
-
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallSequence)
-
-//Orca
-static t_config_enum_values s_keys_map_WallDirection{
-    { "auto", int(WallDirection::Auto) },
-    { "ccw",  int(WallDirection::CounterClockwise) },
-    { "cw",   int(WallDirection::Clockwise)},
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallDirection)
-
-//BBS
-static t_config_enum_values s_keys_map_PrintSequence {
-    { "by layer",     int(PrintSequence::ByLayer) },
-    { "by object",    int(PrintSequence::ByObject) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintSequence)
-
-static t_config_enum_values s_keys_map_PrintOrder{
-    { "default",     int(PrintOrder::Default) },
-    { "as_obj_list", int(PrintOrder::AsObjectList)},
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintOrder)
-
-static t_config_enum_values s_keys_map_SlicingMode {
-    { "regular",        int(SlicingMode::Regular) },
-    { "even_odd",       int(SlicingMode::EvenOdd) },
-    { "close_holes",    int(SlicingMode::CloseHoles) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SlicingMode)
-
-static t_config_enum_values s_keys_map_SupportMaterialPattern {
-    { "rectilinear",        smpRectilinear },
-    { "rectilinear-grid",   smpRectilinearGrid },
-    { "honeycomb",          smpHoneycomb },
-    { "lightning",          smpLightning },
-    { "default",            smpDefault},
-    { "hollow",               smpNone},
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialPattern)
-
-static t_config_enum_values s_keys_map_SupportMaterialStyle {
-    { "default",        smsDefault },
-    { "grid",           smsGrid },
-    { "snug",           smsSnug },
-    { "tree_slim",      smsTreeSlim },
-    { "tree_strong",    smsTreeStrong },
-    { "tree_hybrid",    smsTreeHybrid },
-    { "organic",        smsTreeOrganic }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle)
-
-static t_config_enum_values s_keys_map_SupportMaterialInterfacePattern {
-    { "auto",           smipAuto },
-    { "rectilinear",    smipRectilinear },
-    { "concentric",     smipConcentric },
-    { "rectilinear_interlaced", smipRectilinearInterlaced},
-    { "grid",           smipGrid }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialInterfacePattern)
-
-static t_config_enum_values s_keys_map_SupportType{
-    { "normal(auto)",   stNormalAuto },
-    { "tree(auto)", stTreeAuto },
-    { "normal(manual)", stNormal },
-    { "tree(manual)", stTree }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportType)
-
-static t_config_enum_values s_keys_map_SeamPosition {
-    { "nearest",        spNearest },
-    { "aligned",        spAligned },
-    { "aligned_back",   spAlignedBack },
-    { "back",           spRear },
-    { "random",         spRandom }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SeamPosition)
-
-// Orca
-static t_config_enum_values s_keys_map_SeamScarfType{
-    { "none",           int(SeamScarfType::None) },
-    { "external",       int(SeamScarfType::External) },
-    { "all",            int(SeamScarfType::All) },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SeamScarfType)
-
-// Orca
-static t_config_enum_values s_keys_map_EnsureVerticalShellThickness{
-    { "none",           int(EnsureVerticalShellThickness::evstNone) },
-    { "ensure_critical_only",         int(EnsureVerticalShellThickness::evstCriticalOnly) },
-    { "ensure_moderate",            int(EnsureVerticalShellThickness::evstModerate) },
-    { "ensure_all",         int(EnsureVerticalShellThickness::evstAll) },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnsureVerticalShellThickness)
-
-// Orca
-static t_config_enum_values s_keys_map_InternalBridgeFilter {
-    { "disabled",        ibfDisabled },
-    { "limited",        ibfLimited },
-    { "nofilter",           ibfNofilter },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InternalBridgeFilter)
-
-static t_config_enum_values s_keys_map_EnableExtraBridgeLayer {
-    { "disabled",        eblDisabled },
-    { "external_bridge_only",        eblExternalBridgeOnly },
-    { "internal_bridge_only",        eblInternalBridgeOnly },
-    { "apply_to_all",           eblApplyToAll },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnableExtraBridgeLayer)
-
-// Orca
-static t_config_enum_values s_keys_map_GapFillTarget {
-    { "everywhere",        gftEverywhere },
-    { "topbottom",        gftTopBottom },
-    { "nowhere",           gftNowhere },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GapFillTarget)
-
-static const t_config_enum_values s_keys_map_SLADisplayOrientation = {
-    { "landscape",      sladoLandscape},
-    { "portrait",       sladoPortrait}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SLADisplayOrientation)
-
-static const t_config_enum_values s_keys_map_SLAPillarConnectionMode = {
-    {"zigzag",          slapcmZigZag},
-    {"cross",           slapcmCross},
-    {"dynamic",         slapcmDynamic}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SLAPillarConnectionMode)
-
-static const t_config_enum_values s_keys_map_SLAMaterialSpeed = {
-    {"slow", slamsSlow},
-    {"fast", slamsFast}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SLAMaterialSpeed);
-
-static const t_config_enum_values s_keys_map_BrimType = {
-    {"no_brim",         btNoBrim},
-    {"outer_only",      btOuterOnly},
-    {"inner_only",      btInnerOnly},
-    {"outer_and_inner", btOuterAndInner},
-    {"auto_brim", btAutoBrim},  // BBS
-    {"brim_ears", btEar},     // Orca
-    {"painted", btPainted},  // BBS
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BrimType)
-
-// using 0,1 to compatible with old files
-static const t_config_enum_values s_keys_map_TimelapseType = {
-    {"0",       tlTraditional},
-    {"1",       tlSmooth}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TimelapseType)
-
-static const t_config_enum_values s_keys_map_SkirtType = {
-    { "combined", stCombined },
-    { "perobject", stPerObject }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SkirtType)
-
-static const t_config_enum_values s_keys_map_DraftShield = {
-    { "disabled", dsDisabled },
-    { "enabled",  dsEnabled  }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(DraftShield)
-
-static const t_config_enum_values s_keys_map_ForwardCompatibilitySubstitutionRule = {
-    { "disable",        ForwardCompatibilitySubstitutionRule::Disable },
-    { "enable",         ForwardCompatibilitySubstitutionRule::Enable },
-    { "enable_silent",  ForwardCompatibilitySubstitutionRule::EnableSilent }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
-
-static const t_config_enum_values s_keys_map_OverhangFanThreshold = {
-    { "0%",         Overhang_threshold_none },
-    { "10%",        Overhang_threshold_1_4  },
-    { "25%",        Overhang_threshold_2_4  },
-    { "50%",        Overhang_threshold_3_4  },
-    { "75%",        Overhang_threshold_4_4  },
-    { "95%",        Overhang_threshold_bridge  }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(OverhangFanThreshold)
-
-// BBS
-static const t_config_enum_values s_keys_map_BedType = {
-    { "Default Plate",      btDefault },
-    { "Supertack Plate",    btSuperTack },
-    { "Cool Plate",         btPC },
-    { "Engineering Plate",  btEP  },
-    { "High Temp Plate",    btPEI  },
-    { "Textured PEI Plate", btPTE },
-    { "Textured Cool Plate", btPCT },
-    // Canonical name for btGESP (UI: "Graphic Effect Plate"). Keep legacy string so old projects/3MF still deserialize.
-    { "Graphic Effect Plate", btGESP },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BedType)
-
-namespace {
-// Two keys map to btGESP; enum_names_from_keys_map assigns the lexicographically last key to names[btGESP].
-// Force the canonical string used by serialize() / 3MF export.
-struct BedTypeGespCanonicalSerializeName
-{
-    BedTypeGespCanonicalSerializeName()
-    {
-        if (s_keys_names_BedType.size() > size_t(btGESP))
-            s_keys_names_BedType[size_t(btGESP)] = "Graphic Effect Plate";
-    }
-} s_bed_type_gesp_canonical_serialize_name;
-} // namespace
-
-// BBS
-static const t_config_enum_values s_keys_map_LayerSeq = {
-    { "Auto",              flsAuto },
-    { "Customize",         flsCustomize },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerSeq)
-
-static t_config_enum_values s_keys_map_NozzleType {
-    { "undefine",       int(NozzleType::ntUndefine) },
-    { "hardened_steel", int(NozzleType::ntHardenedSteel) },
-    { "stainless_steel",int(NozzleType::ntStainlessSteel) },
-    { "brass",          int(NozzleType::ntBrass) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleType)
-
-static t_config_enum_values s_keys_map_PrinterStructure {
-    {"undefine",        int(PrinterStructure::psUndefine)},
-    {"corexy",          int(PrinterStructure::psCoreXY)},
-    {"i3",              int(PrinterStructure::psI3)},
-    {"hbot",            int(PrinterStructure::psHbot)},
-    {"delta",           int(PrinterStructure::psDelta)}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterStructure)
-
-static t_config_enum_values s_keys_map_PerimeterGeneratorType{
-    { "classic", int(PerimeterGeneratorType::Classic) },
-    { "arachne", int(PerimeterGeneratorType::Arachne) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
-
-static const t_config_enum_values s_keys_map_ZHopType = {
-    { "Auto Lift",          zhtAuto },
-    { "Normal Lift",        zhtNormal },
-    { "Slope Lift",         zhtSlope },
-    { "Spiral Lift",        zhtSpiral }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ZHopType)
-
-static const t_config_enum_values s_keys_map_RetractLiftEnforceType = {
-    {"All Surfaces",        rletAllSurfaces},
-    {"Top Only",         rletTopOnly},
-    {"Bottom Only",      rletBottomOnly},
-    {"Top and Bottom",      rletTopAndBottom}
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(RetractLiftEnforceType)
-
-static const t_config_enum_values  s_keys_map_GCodeThumbnailsFormat = {
-    { "PNG", int(GCodeThumbnailsFormat::PNG) },
-    { "JPG", int(GCodeThumbnailsFormat::JPG) },
-    { "QOI", int(GCodeThumbnailsFormat::QOI) },
-    { "BTT_TFT", int(GCodeThumbnailsFormat::BTT_TFT) },
-    { "COLPIC", int(GCodeThumbnailsFormat::ColPic) }
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GCodeThumbnailsFormat)
-
-static const t_config_enum_values s_keys_map_CounterboreHoleBridgingOption{
-    { "none", chbNone },
-    { "partiallybridge", chbBridges },
-    { "sacrificiallayer", chbFilled },
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CounterboreHoleBridgingOption)
-
-static const t_config_enum_values s_keys_map_WipeTowerWallType{
-    {"rectangle", wtwRectangle},
-    {"cone", wtwCone},
-    {"rib", wtwRib},
-};
-CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerWallType)
-
-static void assign_printer_technology_to_unknown(t_optiondef_map &options, PrinterTechnology printer_technology)
-{
-    for (std::pair<const t_config_option_key, ConfigOptionDef> &kvp : options)
-        if (kvp.second.printer_technology == ptUnknown)
-            kvp.second.printer_technology = printer_technology;
-}
-
-PrintConfigDef::PrintConfigDef()
-{
-    this->init_common_params();
-    assign_printer_technology_to_unknown(this->options, ptAny);
-    this->init_fff_params();
-    this->init_extruder_option_keys();
-    assign_printer_technology_to_unknown(this->options, ptFFF);
-    this->init_sla_params();
-    assign_printer_technology_to_unknown(this->options, ptSLA);
-}
-
-void PrintConfigDef::init_common_params()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("printer_technology", coEnum);
-    def->label = L("Printer technology");
-    //def->tooltip = L("Printer technology.");
-    def->enum_keys_map = &ConfigOptionEnum<PrinterTechnology>::get_enum_values();
-    def->enum_values.push_back("FFF");
-    def->enum_values.push_back("SLA");
-    def->set_default_value(new ConfigOptionEnum<PrinterTechnology>(ptFFF));
-
-    def = this->add("printable_area", coPoints);
-    def->label = L("Printable area");
-    //BBS
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPoints{ Vec2d(0, 0), Vec2d(200, 0), Vec2d(200, 200), Vec2d(0, 200) });
-
-    //BBS: add "bed_exclude_area"
-    def = this->add("bed_exclude_area", coPoints);
-    def->label = L("Bed exclude area");
-    def->tooltip = L("Unprintable area in XY plane. For example, X1 Series printers use the front left corner to cut filament during filament change. "
-        "The area is expressed as polygon by points in following format: \"XxY, XxY, ...\"");
-    def->mode = comAdvanced;
-    def->gui_type = ConfigOptionDef::GUIType::one_string;
-    def->set_default_value(new ConfigOptionPoints{ Vec2d(0, 0) });
-
-    def = this->add("bed_custom_texture", coString);
-    def->label = L("Bed custom texture");
-    def->mode = comAdvanced;
-    def->gui_type = ConfigOptionDef::GUIType::one_string;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("bed_custom_model", coString);
-    def->label = L("Bed custom model");
-    def->mode = comAdvanced;
-    def->gui_type = ConfigOptionDef::GUIType::one_string;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("elefant_foot_compensation", coFloat);
-    def->label = L("Elephant foot compensation");
-    def->category = L("Quality");
-    def->tooltip = L("Shrinks the initial layer on build plate to compensate for elephant foot effect.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def           = this->add("elefant_foot_compensation_layers", coInt);
-    def->label    = L("Elephant foot compensation layers");
-    def->category = L("Quality");
-    def->tooltip  = L("The number of layers on which the elephant foot compensation will be active. "
-                       "The first layer will be shrunk by the elephant foot compensation value, then "
-                       "the next layers will be linearly shrunk less, up to the layer indicated by this value.");
-    def->sidetext = L("layers");
-    def->min      = 1;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));	
-
-    def = this->add("layer_height", coFloat);
-    def->label = L("Layer height");
-    def->category = L("Quality");
-    def->tooltip = L("Slicing height for each layer. Smaller layer height means more accurate and more printing time.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("printable_height", coFloat);
-    def->label = L("Printable height");
-    def->tooltip = L("Maximum printable height which is limited by mechanism of printer.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 214700;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(100.0));
-
-    def = this->add("preferred_orientation", coFloat);
-    def->label = L("Preferred orientation");
-    def->tooltip = L("Automatically orient stls on the Z axis upon initial import.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->max = 360;
-    def->min = -360;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    // Options used by physical printers
-
-    def = this->add("preset_names", coStrings);
-    def->label = L("Printer preset names");
-    //def->tooltip = L("Names of presets related to the physical printer.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("bbl_use_printhost", coBool);
-    def->label = L("Use 3rd-party print host");
-    def->tooltip = L("Allow controlling BambuLab's printer through 3rd party print hosts.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("print_host", coString);
-    def->label = L("Hostname, IP or URL");
-    def->tooltip = L("Snapmaker Orca can upload G-code files to a printer host. This field should contain "
-        "the hostname, IP address or URL of the printer host instance. "
-        "Print host behind HAProxy with basic auth enabled can be accessed by putting the user name and password into the URL "
-        "in the following format: https://username:password@your-octopi-address/");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("print_host_webui", coString);
-    def->label = L("Device UI");
-    def->tooltip = L("Specify the URL of your device user interface if it's not same as print_host.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("printhost_apikey", coString);
-    def->label = L("API Key / Password");
-    def->tooltip = L("Snapmaker Orca can upload G-code files to a printer host. This field should contain "
-        "the API Key or the password required for authentication.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("printhost_port", coString);
-    def->label = L("Printer");
-    def->tooltip = L("Name of the printer.");
-    def->gui_type = ConfigOptionDef::GUIType::select_open;
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("printhost_cafile", coString);
-    def->label = L("HTTPS CA File");
-    def->tooltip = L("Custom CA certificate file can be specified for HTTPS OctoPrint connections, in crt/pem format. "
-        "If left blank, the default OS CA certificate repository is used.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    // Options used by physical printers
-
-    def = this->add("printhost_user", coString);
-    def->label = L("User");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("printhost_password", coString);
-    def->label = L("Password");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionString());
-
-    // Only available on Windows.
-    def = this->add("printhost_ssl_ignore_revoke", coBool);
-    def->label = L("Ignore HTTPS certificate revocation checks");
-    def->tooltip = L("Ignore HTTPS certificate revocation checks in case of missing or offline distribution points. "
-        "One may want to enable this option for self signed certificates if connection fails.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("preset_names", coStrings);
-    def->label = L("Printer preset names");
-    def->tooltip = L("Names of presets related to the physical printer.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("printhost_authorization_type", coEnum);
-    def->label = L("Authorization Type");
-    //def->tooltip = L("");
-    def->enum_keys_map = &ConfigOptionEnum<AuthorizationType>::get_enum_values();
-    def->enum_values.push_back("key");
-    def->enum_values.push_back("user");
-    def->enum_labels.push_back(L("API key"));
-    def->enum_labels.push_back(L("HTTP digest"));
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionEnum<AuthorizationType>(atKeyPassword));
-    
-    // temporary workaround for compatibility with older Slicer
-    {
-        def = this->add("preset_name", coString);
-        def->set_default_value(new ConfigOptionString());
-    }
-}
-
-void PrintConfigDef::init_fff_params()
-{
-    ConfigOptionDef* def;
-
-    // Maximum extruder temperature, bumped to 1500 to support printing of glass.
-    const int max_temp = 1500;
-
-    def = this->add("reduce_crossing_wall", coBool);
-    def->label = L("Avoid crossing walls");
-    def->category = L("Quality");
-    def->tooltip = L("Detour and avoid to travel across wall which may cause blob on surface");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("max_travel_detour_distance", coFloatOrPercent);
-    def->label = L("Avoid crossing walls - Max detour length");
-    def->category = L("Quality");
-    def->tooltip = L("Maximum detour distance for avoiding crossing wall. "
-                     "Don't detour if the detour distance is larger than this value. "
-                     "Detour length could be specified either as an absolute value or as percentage (for example 50%) of a direct travel path. Zero to disable.");
-    def->sidetext = L("mm or %");
-    def->min = 0;
-    def->max_literal = 1000;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    // BBS
-    def = this->add("supertack_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 120;
-    def->set_default_value(new ConfigOptionInts{35});
-
-    def = this->add("cool_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 35 });
-
-    def = this->add("textured_cool_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 40 });
-
-    def = this->add("eng_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 45 });
-
-    def = this->add("hot_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 45 });
-
-    def = this->add("textured_plate_temp", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Bed temperature for layers except the initial one. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{45});
-
-    def             = this->add("graphic_effect_plate_temp", coInts);
-    def->label      = L("Other layers");
-    def->tooltip    = L("Bed temperature for layers except the initial one. "
-                           "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext   = u8"\u2103" /* Â°C */; // degrees Celsius, don't need translation
-    def->full_label = L("Bed temperature");
-    def->min        = 0;
-    def->max        = 300;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("supertack_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = 120;
-    def->set_default_value(new ConfigOptionInts{ 35 });
-
-    def = this->add("cool_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = 120;
-    def->set_default_value(new ConfigOptionInts{ 35 });
-
-    def = this->add("textured_cool_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = 120;
-    def->set_default_value(new ConfigOptionInts{ 40 });
-
-    def = this->add("eng_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 45 });
-
-    def = this->add("hot_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{ 45 });
-
-    def = this->add("textured_plate_temp_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip = L("Bed temperature of the initial layer. "
-                     "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = 300;
-    def->set_default_value(new ConfigOptionInts{45});
-
-    def             = this->add("graphic_effect_plate_temp_initial_layer", coInts);
-    def->label      = L("Initial layer");
-    def->full_label = L("Initial layer bed temperature");
-    def->tooltip    = L("Bed temperature of the initial layer. "
-                           "A value of 0 means the filament does not support printing on this plate.");
-    def->sidetext   = u8"\u2103" /* Â°C */; // degrees Celsius, don't need translation
-    def->min        = 0;
-    def->max        = 300;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("curr_bed_type", coEnum);
-    def->label = L("Bed type");
-    def->tooltip = L("Bed types supported by the printer.");
-    def->mode = comSimple;
-    def->enum_keys_map = &s_keys_map_BedType;
-    // Orca: make sure the order of the values is the same as the BedType enum 
-    def->enum_values.emplace_back("Cool Plate");
-    def->enum_values.emplace_back("Engineering Plate");
-    def->enum_values.emplace_back("High Temp Plate");
-    def->enum_values.emplace_back("Textured PEI Plate");
-    def->enum_values.emplace_back("Textured Cool Plate");
-    def->enum_values.emplace_back("Supertack Plate");
-    def->enum_labels.emplace_back(L("Smooth Cool Plate"));
-    def->enum_labels.emplace_back(L("Engineering Plate"));
-    def->enum_labels.emplace_back(L("Smooth High Temp Plate"));
-    def->enum_labels.emplace_back(L("Textured PEI Plate"));
-    def->enum_labels.emplace_back(L("Textured Cool Plate"));
-    def->enum_labels.emplace_back(L("Cool Plate (SuperTack)"));
-    // U1 only 3
-    def->enum_values_u1.emplace_back("Textured PEI Plate");
-    def->enum_values_u1.emplace_back("High Temp Plate");
-    def->enum_values_u1.emplace_back("Graphic Effect Plate");
-    def->enum_labels_u1.emplace_back(L("Textured PEI Plate"));
-    def->enum_labels_u1.emplace_back(L("Smooth PEI Plate"));
-    def->enum_labels_u1.emplace_back(L("Graphic Effect Plate"));
-    // U1 use 7 when open support_multi_bed_types
-    def->enum_values_ex.emplace_back("Cool Plate");
-    def->enum_values_ex.emplace_back("Engineering Plate");
-    def->enum_values_ex.emplace_back("High Temp Plate");
-    def->enum_values_ex.emplace_back("Textured PEI Plate");
-    def->enum_values_ex.emplace_back("Textured Cool Plate");
-    def->enum_values_ex.emplace_back("Supertack Plate");
-    def->enum_values_ex.emplace_back("Graphic Effect Plate");
-    def->enum_labels_ex.emplace_back(L("Smooth Cool Plate"));
-    def->enum_labels_ex.emplace_back(L("Engineering Plate"));
-    def->enum_labels_ex.emplace_back(L("Smooth PEI Plate"));
-    def->enum_labels_ex.emplace_back(L("Textured PEI Plate"));
-    def->enum_labels_ex.emplace_back(L("Textured Cool Plate"));
-    def->enum_labels_ex.emplace_back(L("Cool Steel Plate"));
-    def->enum_labels_ex.emplace_back(L("Graphic Effect Plate"));
-    def->set_default_value(new ConfigOptionEnum<BedType>(btPC));
-
-    // Orca: allow profile maker to set default bed type in machine profile
-    // This option won't be shown in the UI
-    def = this->add("default_bed_type", coString);
-    def->label = L("Default bed type");
-    def->tooltip = L("Default bed type for the printer (supports both numeric and string format).");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    // BBS
-    def             = this->add("first_layer_print_sequence", coInts);
-    def->label      = L("First layer print sequence");
-    def->min        = 0;
-    def->max        = 16;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def        = this->add("other_layers_print_sequence", coInts);
-    def->label = L("Other layers print sequence");
-    def->min   = 0;
-    def->max   = 16;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def        = this->add("other_layers_print_sequence_nums", coInt);
-    def->label = L("The number of other layers print sequence");
-    def->set_default_value(new ConfigOptionInt{0});
-
-    def = this->add("first_layer_sequence_choice", coEnum);
-    def->category = L("Quality");
-    def->label = L("First layer filament sequence");
-    def->enum_keys_map = &ConfigOptionEnum<LayerSeq>::get_enum_values();
-    def->enum_values.push_back("Auto");
-    def->enum_values.push_back("Customize");
-    def->enum_labels.push_back(L("Auto"));
-    def->enum_labels.push_back(L("Customize"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<LayerSeq>(flsAuto));
-
-    def = this->add("other_layers_sequence_choice", coEnum);
-    def->category = L("Quality");
-    def->label = L("Other layers filament sequence");
-    def->enum_keys_map = &ConfigOptionEnum<LayerSeq>::get_enum_values();
-    def->enum_values.push_back("Auto");
-    def->enum_values.push_back("Customize");
-    def->enum_labels.push_back(L("Auto"));
-    def->enum_labels.push_back(L("Customize"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<LayerSeq>(flsAuto));
-
-    def = this->add("before_layer_change_gcode", coString);
-    def->label = L("Before layer change G-code");
-    def->tooltip = L("This G-code is inserted at every layer change before the Z lift.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 5;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("bottom_shell_layers", coInt);
-    def->label = L("Bottom shell layers");
-    def->category = L("Strength");
-    def->sidetext = L("layers"); // ORCA add side text
-    def->tooltip =  L("This is the number of solid layers of bottom shell, including the bottom "
-                      "surface layer. When the thickness calculated by this value is thinner "
-                      "than bottom shell thickness, the bottom shell layers will be increased.");
-    def->full_label = L("Bottom shell layers");
-    def->min = 0;
-    def->set_default_value(new ConfigOptionInt(3));
-
-    def = this->add("bottom_shell_thickness", coFloat);
-    def->label = L("Bottom shell thickness");
-    def->category = L("Strength");
-    def->tooltip = L("The number of bottom solid layers is increased when slicing if the thickness calculated by bottom shell layers is "
-                     "thinner than this value. This can avoid having too thin shell when layer height is small. 0 means that "
-                     "this setting is disabled and thickness of bottom shell is absolutely determined by bottom shell layers.");
-    def->full_label = L("Bottom shell thickness");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("gap_fill_target", coEnum);
-    def->label = L("Apply gap fill");
-    def->category = L("Strength");
-    def->tooltip = L("Enables gap fill for the selected solid surfaces. The minimum gap length that will be filled can be controlled "
-                     "from the filter out tiny gaps option below.\n\n"
-                     "Options:\n"
-                     "1. Everywhere: Applies gap fill to top, bottom and internal solid surfaces for maximum strength\n"
-                     "2. Top and Bottom surfaces: Applies gap fill to top and bottom surfaces only, balancing print speed, "
-                     "reducing potential over extrusion in the solid infill and making sure the top and bottom surfaces have "
-                     "no pinhole gaps\n"
-                     "3. Nowhere: Disables gap fill for all solid infill areas\n\n"
-                     "Note that if using the classic perimeter generator, gap fill may also be generated between perimeters, "
-                     "if a full width line cannot fit between them. That perimeter gap fill is not controlled by this setting.\n\n"
-                     "If you would like all gap fill, including the classic perimeter generated one, removed, "
-                     "set the filter out tiny gaps value to a large number, like 999999.\n\n"
-                     "However this is not advised, as gap fill between perimeters is contributing to the model's strength. "
-                     "For models where excessive gap fill is generated between perimeters, a better option would be to "
-                     "switch to the arachne wall generator and use this option to control whether the cosmetic top and "
-                     "bottom surface gap fill is generated.");
-    def->enum_keys_map = &ConfigOptionEnum<GapFillTarget>::get_enum_values();
-    def->enum_values.push_back("everywhere");
-    def->enum_values.push_back("topbottom");
-    def->enum_values.push_back("nowhere");
-    def->enum_labels.push_back(L("Everywhere"));
-    def->enum_labels.push_back(L("Top and bottom surfaces"));
-    def->enum_labels.push_back(L("Nowhere"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<GapFillTarget>(gftNowhere));
-
-    def = this->add("enable_overhang_bridge_fan", coBools);
-    def->label = L("Force cooling for overhangs and bridges");
-    def->tooltip = L("Enable this option to allow adjustment of the part cooling fan speed for specifically for overhangs, internal and external "
-                     "bridges. Setting the fan speed specifically for these features can improve overall print quality and reduce warping.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBools{ true });
-
-    def = this->add("overhang_fan_speed", coInts);
-    def->label = L("Overhangs and external bridges fan speed");
-    def->tooltip = L("Use this part cooling fan speed when printing bridges or overhang walls with an overhang threshold that exceeds "
-                     "the value set in the 'Overhangs cooling threshold' parameter above. Increasing the cooling specifically for overhangs "
-                     "and bridges can improve the overall print quality of these features.\n\n"
-                     "Please note, this fan speed is clamped on the lower end by the minimum fan speed threshold set above. It is also adjusted "
-                     "upwards up to the maximum fan speed threshold when the minimum layer time threshold is not met.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 100 });
-
-    def = this->add("overhang_fan_threshold", coEnums);
-    def->label = L("Overhang cooling activation threshold");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("When the overhang exceeds this specified threshold, force the cooling fan to run at the 'Overhang Fan Speed' set below. "
-                     "This threshold is expressed as a percentage, indicating the portion of each line's width that is unsupported by the layer "
-                     "beneath it. Setting this value to 0% forces the cooling fan to run for all outer walls, regardless of the overhang degree.");
-    //def->sidetext = "";
-    def->enum_keys_map = &ConfigOptionEnum<OverhangFanThreshold>::get_enum_values();
-    def->mode = comAdvanced;
-    def->enum_values.emplace_back("0%");
-    def->enum_values.emplace_back("10%");
-    def->enum_values.emplace_back("25%");
-    def->enum_values.emplace_back("50%");
-    def->enum_values.emplace_back("75%");
-    def->enum_values.emplace_back("95%");
-    def->enum_labels.emplace_back("0%");
-    def->enum_labels.emplace_back("10%");
-    def->enum_labels.emplace_back("25%");
-    def->enum_labels.emplace_back("50%");
-    def->enum_labels.emplace_back("75%");
-    def->enum_labels.emplace_back("95%");
-    def->set_default_value(new ConfigOptionEnumsGeneric{ (int)Overhang_threshold_bridge });
-
-    def = this->add("bridge_angle", coFloat);
-    def->label = L("External bridge infill direction");
-    def->category = L("Strength");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Bridging angle override. If left to zero, the bridging angle will be calculated "
-        "automatically. Otherwise the provided angle will be used for external bridges. "
-        "Use 180Â°for zero angle.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-    
-    // ORCA: Internal bridge angle override
-    def = this->add("internal_bridge_angle", coFloat);
-    def->label = L("Internal bridge infill direction");
-    def->category = L("Strength");
-    def->tooltip = L("Internal bridging angle override. If left to zero, the bridging angle will be calculated "
-        "automatically. Otherwise the provided angle will be used for internal bridges. "
-        "Use 180Â°for zero angle.\n\nIt is recommended to leave it at 0 unless there is a specific model need not to.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("bridge_density", coPercent);
-    def->label = L("External bridge density");
-    def->category = L("Strength");
-    def->tooltip = L("Controls the density (spacing) of external bridge lines. 100% means solid bridge. Default is 100%.\n\n"
-                     "Lower density external bridges can help improve reliability as there is more space for air to circulate "
-                     "around the extruded bridge, improving its cooling speed.");
-    def->sidetext = "%";
-    def->min = 10;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-    def = this->add("internal_bridge_density", coPercent);
-    def->label = L("Internal bridge density");
-    def->category = L("Strength");
-    def->tooltip = L("Controls the density (spacing) of internal bridge lines. 100% means solid bridge. Default is 100%.\n\n"
-                     "Lower density internal bridges can help reduce top surface pillowing and improve internal bridge reliability as there is more space for "
-                     "air to circulate around the extruded bridge, improving its cooling speed.\n\n"
-                     "This option works particularly well when combined with the second internal bridge over infill option, "
-                     "further improving internal bridging structure before solid infill is extruded.");
-    def->sidetext = "%";
-    def->min = 10;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-    def = this->add("bridge_flow", coFloat);
-    def->label = L("Bridge flow ratio");
-    def->category = L("Quality");
-    def->tooltip = L("Decrease this value slightly (for example 0.9) to reduce the amount of material for bridge, to improve sag.\n\n"
-                     "The actual bridge flow used is calculated by multiplying this value with the filament flow ratio, and if set, the object's flow ratio.");
-    def->min = 0;
-    def->max = 2.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("internal_bridge_flow", coFloat);
-    def->label = L("Internal bridge flow ratio");
-    def->category = L("Quality");
-    def->tooltip = L("This value governs the thickness of the internal bridge layer. This is the first layer over sparse infill. Decrease this value slightly (for example 0.9) to improve surface quality over sparse infill."
-                     "\n\nThe actual internal bridge flow used is calculated by multiplying this value with the bridge flow ratio, the filament flow ratio, and if set, the object's flow ratio.");
-    def->min = 0;
-    def->max = 2.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("top_solid_infill_flow_ratio", coFloat);
-    def->label = L("Top surface flow ratio");
-    def->category = L("Advanced");
-    def->tooltip = L("This factor affects the amount of material for top solid infill. "
-                     "You can decrease it slightly to have smooth surface finish.\n\n"
-                     "The actual top surface flow used is calculated by multiplying this value with the filament flow ratio, and if set, the object's flow ratio.");
-    def->min = 0;
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("bottom_solid_infill_flow_ratio", coFloat);
-    def->label = L("Bottom surface flow ratio");
-    def->category = L("Advanced");
-    def->tooltip = L("This factor affects the amount of material for bottom solid infill.\n\n"
-                     "The actual bottom solid infill flow used is calculated by multiplying this value with the filament flow ratio, and if set, the object's flow ratio.");
-    def->min = 0;
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-
-    def = this->add("precise_outer_wall",coBool);
-    def->label = L("Precise wall");
-    def->category = L("Quality");
-    def->tooltip  = L("Improve shell precision by adjusting outer wall spacing. This also improves layer consistency. NOTE: This option "
-                       "will be ignored for outer-inner or inner-outer-inner wall sequences.");
-    def->set_default_value(new ConfigOptionBool{true});
-
-    def = this->add("only_one_wall_top", coBool);
-    def->label = L("Only one wall on top surfaces");
-    def->category = L("Quality");
-    def->tooltip = L("Use only one wall on flat top surfaces, to give more space to the top infill pattern.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    // the tooltip is copied from SuperStudio
-    def = this->add("min_width_top_surface", coFloatOrPercent);
-    def->label = L("One wall threshold");
-    def->category = L("Quality");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("If a top surface has to be printed and it's partially covered by another layer, it won't be considered at a top layer where its width is below this value."
-        " This can be useful to not let the 'one perimeter on top' trigger on surface that should be covered only by perimeters."
-        " This value can be a mm or a % of the perimeter extrusion width."
-        "\nWarning: If enabled, artifacts can be created if you have some thin features on the next layer, like letters. Set this setting to 0 to remove these artifacts.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "inner_wall_line_width";
-    def->min = 0;
-    def->max_literal = 15;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(300, true));
-
-    def = this->add("only_one_wall_first_layer", coBool);
-    def->label = L("Only one wall on first layer");
-    def->category = L("Quality");
-    def->tooltip = L("Use only one wall on first layer, to give more space to the bottom infill pattern.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("extra_perimeters_on_overhangs", coBool);
-    def->label = L("Extra perimeters on overhangs");
-    def->category = L("Quality");
-    def->tooltip = L("Create additional perimeter paths over steep overhangs and areas where bridges cannot be anchored.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("overhang_reverse", coBool);
-    def->label = L("Reverse on even");
-    def->full_label = L("Overhang reversal");
-    def->category = L("Quality");
-    def->tooltip = L("Extrude perimeters that have a part over an overhang in the reverse direction on even layers. This alternating pattern can drastically improve steep overhangs.\n\nThis setting can also help reduce part warping due to the reduction of stresses in the part walls.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("overhang_reverse_internal_only", coBool);
-    def->label = L("Reverse only internal perimeters");
-    def->full_label = L("Reverse only internal perimeters");
-    def->category = L("Quality");
-    def->tooltip = L("Apply the reverse perimeters logic only on internal perimeters.\n\n"
-                     "This setting greatly reduces part stresses as they are now distributed in alternating directions. "
-                     "This should reduce part warping while also maintaining external wall quality. "
-                     "This feature can be very useful for warp prone material, like ABS/ASA, and also for elastic filaments, like TPU and Silk PLA. "
-                     "It can also help reduce warping on floating regions over supports.\n\nFor this setting to be the most effective, "
-                     "it is recommended to set the Reverse Threshold to 0 so that all internal walls print in alternating directions on even layers irrespective of their overhang degree.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("counterbore_hole_bridging", coEnum);
-    def->label = L("Bridge counterbore holes");
-    def->category = L("Quality");
-    def->tooltip  = L(
-        "This option creates bridges for counterbore holes, allowing them to be printed without support. Available modes include:\n"
-         "1. None: No bridge is created\n"
-         "2. Partially Bridged: Only a part of the unsupported area will be bridged\n"
-         "3. Sacrificial Layer: A full sacrificial bridge layer is created");
-    def->mode = comAdvanced;
-    def->enum_keys_map = &ConfigOptionEnum<CounterboreHoleBridgingOption>::get_enum_values();
-    def->enum_values.emplace_back("none");
-    def->enum_values.emplace_back("partiallybridge");
-    def->enum_values.emplace_back("sacrificiallayer");
-    def->enum_labels.emplace_back(L("None"));
-    def->enum_labels.emplace_back(L("Partially bridged"));
-    def->enum_labels.emplace_back(L("Sacrificial layer"));
-    def->set_default_value(new ConfigOptionEnum<CounterboreHoleBridgingOption>(chbNone));
-
-    def = this->add("overhang_reverse_threshold", coFloatOrPercent);
-    def->label = L("Reverse threshold");
-    def->full_label = L("Overhang reversal threshold");
-    def->category = L("Quality");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Number of mm the overhang need to be for the reversal to be considered useful. Can be a % of the perimeter width."
-                     "\nValue 0 enables reversal on every even layers regardless."
-                     "\nWhen Detect overhang wall is not enabled, this option is ignored and reversal happens on every even layers regardless.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "line_width";
-    def->min = 0;
-    def->max_literal = 20;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
-
-    def = this->add("enable_overhang_speed", coBool);
-    def->label = L("Slow down for overhang");
-    def->category = L("Speed");
-    def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool{ true });
-    
-    def = this->add("slowdown_for_curled_perimeters", coBool);
-    def->label = L("Slow down for curled perimeters");
-    def->category = L("Speed");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Enable this option to slow down printing in areas where perimeters may have curled upwards. "
-                     "For example, additional slowdown will be applied when printing overhangs on sharp corners like the "
-                     "front of the Benchy hull, reducing curling which compounds over multiple layers.\n\n"
-                     "It is generally recommended to have this option switched on unless your printer cooling is powerful enough or the "
-                     "print speed slow enough that perimeter curling does not happen. If printing with a high external perimeter speed, "
-                     "this parameter may introduce slight artifacts when slowing down due to the large variance in print speeds. "
-                     "If you notice artifacts, ensure your pressure advance is tuned correctly.\n\n"
-                     "Note: When this option is enabled, overhang perimeters are treated like overhangs, meaning the overhang speed is "
-                     "applied even if the overhanging perimeter is part of a bridge. For example, when the perimeters are 100% overhanging"
-                     ", with no wall supporting them from underneath, the 100% overhang speed will be applied.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool{ true });
-
-    def = this->add("overhang_1_4_speed", coFloatOrPercent);
-    def->label = "(10%, 25%)";
-    def->category = L("Speed");
-    def->full_label = "(10%, 25%)";
-    //def->tooltip = L("Speed for line of wall which has degree of overhang between 10% and 25% line width. "
-    //                 "0 means using original wall speed.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "outer_wall_speed";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("overhang_2_4_speed", coFloatOrPercent);
-    def->label = "[25%, 50%)";
-    def->category = L("Speed");
-    def->full_label = "[25%, 50%)";
-    //def->tooltip = L("Speed for line of wall which has degree of overhang between 25% and 50% line width. "
-    //                 "0 means using original wall speed.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "outer_wall_speed";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("overhang_3_4_speed", coFloatOrPercent);
-    def->label = "[50%, 75%)";
-    def->category = L("Speed");
-    def->full_label = "[50%, 75%)";
-    //def->tooltip = L("Speed for line of wall which has degree of overhang between 50% and 75% line width. "
-    //                 "0 means using original wall speed.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "outer_wall_speed";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("overhang_4_4_speed", coFloatOrPercent);
-    def->label = "[75%, 100%)";
-    def->category = L("Speed");
-    def->full_label = "[75%, 100%)";
-    //def->tooltip = L("Speed for line of wall which has degree of overhang between 75% and 100% line width. "
-    //                 "0 means using original wall speed.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "outer_wall_speed";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("bridge_speed", coFloat);
-    def->label = L("External");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of the externally visible bridge extrusions.\n\n"
-                     "In addition, if Slow down for curled perimeters is disabled or Classic overhang mode is enabled, "
-                     "it will be the print speed of overhang walls that are supported by less than 13%, "
-                     "whether they are part of a bridge or an overhang.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(25));
-
-    def = this->add("internal_bridge_speed", coFloatOrPercent);
-    def->label = L("Internal");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of internal bridges. If the value is expressed as a percentage, it will be calculated based on the bridge_speed. Default value is 150%.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "bridge_speed";
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(150, true));
-
-    def = this->add("brim_width", coFloat);
-    def->label = L("Brim width");
-    def->category = L("Support");
-    def->tooltip = L("Distance from model to the outermost brim line.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("brim_type", coEnum);
-    def->label = L("Brim type");
-    def->category = L("Support");
-    def->tooltip = L("This controls the generation of the brim at outer and/or inner side of models. "
-                     "Auto means the brim width is analyzed and calculated automatically.");
-    def->enum_keys_map = &ConfigOptionEnum<BrimType>::get_enum_values();
-    def->enum_values.emplace_back("auto_brim");
-    def->enum_values.emplace_back("brim_ears");
-    def->enum_values.emplace_back("painted");
-    def->enum_values.emplace_back("outer_only");
-    def->enum_values.emplace_back("inner_only");
-    def->enum_values.emplace_back("outer_and_inner");
-    def->enum_values.emplace_back("no_brim");
-    def->enum_labels.emplace_back(L("Auto"));
-    def->enum_labels.emplace_back(L("Mouse ear"));
-    def->enum_labels.emplace_back(L("Painted"));
-    def->enum_labels.emplace_back(L("Outer brim only"));
-    def->enum_labels.emplace_back(L("Inner brim only"));
-    def->enum_labels.emplace_back(L("Outer and inner brim"));
-    def->enum_labels.emplace_back(L("No-brim"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<BrimType>(btAutoBrim));
-
-    def = this->add("brim_object_gap", coFloat);
-    def->label = L("Brim-object gap");
-    def->category = L("Support");
-    def->tooltip = L("A gap between innermost brim line and object can make brim be removed more easily.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("brim_ears", coBool);
-    def->label = L("Brim ears");
-    def->category = L("Support");
-    def->tooltip = L("Only draw brim over the sharp edges of the model.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("brim_ears_max_angle", coFloat);
-    def->label = L("Brim ear max angle");
-    def->category = L("Support");
-    def->tooltip = L("Maximum angle to let a brim ear appear.\n"
-                     "If set to 0, no brim will be created.\n"
-                     "If set to ~180, brim will be created on everything but straight sections.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 180;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(125));
-
-    def = this->add("brim_ears_detection_length", coFloat);
-    def->label = L("Brim ear detection radius");
-    def->category = L("Support");
-    def->tooltip = L("The geometry will be decimated before detecting sharp angles. "
-                     "This parameter indicates the minimum length of the deviation for the decimation.\n"
-                     "0 to deactivate.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("compatible_printers", coStrings);
-    def->label = L("Select printers");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    //BBS.
-    def        = this->add("upward_compatible_machine", coStrings);
-    def->label = L("upward compatible machine");
-    def->mode  = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli   = ConfigOptionDef::nocli;
-
-    def = this->add("compatible_printers_condition", coString);
-    def->label = L("Condition");
-    def->tooltip = L("A boolean expression using the configuration values of an active printer profile. "
-                  "If this expression evaluates to true, this profile is considered compatible "
-                  "with the active printer profile.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("compatible_prints", coStrings);
-    def->label = L("Select profiles");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("compatible_prints_condition", coString);
-    def->label = L("Condition");
-    def->tooltip = L("A boolean expression using the configuration values of an active print profile. "
-                  "If this expression evaluates to true, this profile is considered compatible "
-                  "with the active print profile.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    // The following value is to be stored into the project file (AMF, 3MF, Config ...)
-    // and it contains a sum of "compatible_printers_condition" values over the print and filament profiles.
-    def = this->add("compatible_machine_expression_group", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-    def = this->add("compatible_process_expression_group", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    //BBS: add logic for checking between different system presets
-    def = this->add("different_settings_to_system", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("print_compatible_printers", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("print_sequence", coEnum);
-    def->label = L("Print sequence");
-    def->tooltip = L("Print sequence, layer by layer or object by object.");
-    def->enum_keys_map = &ConfigOptionEnum<PrintSequence>::get_enum_values();
-    def->enum_values.push_back("by layer");
-    def->enum_values.push_back("by object");
-    def->enum_labels.push_back(L("By layer"));
-    def->enum_labels.push_back(L("By object"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
-
-    def = this->add("print_order", coEnum);
-    def->label = L("Intra-layer order");
-    def->tooltip = L("Print order within a single layer.");
-    def->enum_keys_map = &ConfigOptionEnum<PrintOrder>::get_enum_values();
-    def->enum_values.push_back("default");
-    def->enum_values.push_back("as_obj_list");
-    def->enum_labels.push_back(L("Default"));
-    def->enum_labels.push_back(L("As object list"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<PrintOrder>(PrintOrder::Default));
-
-    def = this->add("slow_down_for_layer_cooling", coBools);
-    def->label = L("Slow printing down for better layer cooling");
-    def->tooltip = L("Enable this option to slow printing speed down to make the final layer time not shorter than "
-                     "the layer time threshold in \"Max fan speed threshold\", so that layer can be cooled for longer time. "
-                     "This can improve the cooling quality for needle and small details.");
-    def->set_default_value(new ConfigOptionBools { true });
-
-    def = this->add("default_acceleration", coFloat);
-    def->label = L("Normal printing");
-    def->tooltip = L("The default acceleration of both normal printing and travel except initial layer.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(500.0));
-
-    def = this->add("default_filament_profile", coStrings);
-    def->label = L("Default filament profile");
-    def->tooltip = L("Default filament profile when switching to this machine profile.");
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("default_print_profile", coString);
-    def->label = L("Default process profile");
-    def->tooltip = L("Default process profile when switching to this machine profile.");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("activate_air_filtration",coBools);
-    def->label = L("Activate air filtration");
-    def->tooltip = L("Activate for better air filtration. G-code command: M106 P3 S(0-255)");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBools{false});
-
-    def = this->add("during_print_exhaust_fan_speed", coInts);
-    def->label   = L("Fan speed");
-    def->tooltip=L("Speed of exhaust fan during printing. This speed will override the speed in filament custom G-code.");
-    def->sidetext = "%";
-    def->min=0;
-    def->max=100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInts{60});
-
-    def = this->add("complete_print_exhaust_fan_speed", coInts);
-    def->label = L("Fan speed");
-    def->tooltip=L("Speed of exhaust fan after printing completes.");
-    def->sidetext = "%";
-    def->min=0;
-    def->max=100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInts{80});
-
-    def = this->add("close_fan_the_first_x_layers", coInts);
-    def->label = L("No cooling for the first");
-    def->tooltip = L("Turn off all cooling fans for the first few layers. "
-                     "This can be used to improve build plate adhesion.");
-    def->sidetext = L("layers");
-    def->min = 0;
-    def->max = 1000;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInts { 1 });
-
-    def = this->add("bridge_no_support", coBool);
-    def->label = L("Don't support bridges");
-    def->category = L("Support");
-    def->tooltip = L("Don't support the whole bridge area which make support very large. "
-                     "Bridges can usually be printed directly without support if not very long.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("thick_bridges", coBool);
-    def->label = L("Thick external bridges");
-    def->category = L("Quality");
-    def->tooltip = L("If enabled, bridges are more reliable, can bridge longer distances, but may look worse. "
-        "If disabled, bridges look better but are reliable just for shorter bridged distances.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("thick_internal_bridges", coBool);
-    def->label = L("Thick internal bridges");
-    def->category = L("Quality");
-    def->tooltip  = L("If enabled, thick internal bridges will be used. It's usually recommended to have this feature turned on. However, "
-                       "consider turning it off if you are using large nozzles.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-    
-    def = this->add("enable_extra_bridge_layer", coEnum);
-    def->label = L("Extra bridge layers (beta)");
-    def->category = L("Quality");
-    def->tooltip = L("This option enables the generation of an extra bridge layer over internal and/or external bridges.\n\n"
-                     "Extra bridge layers help improve bridge appearance and reliability, as the solid infill is better supported. "
-                     "This is especially useful in fast printers, where the bridge and solid infill speeds vary greatly. "
-                     "The extra bridge layer results in reduced pillowing on top surfaces, as well as reduced separation of the external bridge layer from its surrounding perimeters.\n\n"
-                     "It is generally recommended to set this to at least 'External bridge only', unless specific issues with the sliced model are found.\n\n"
-                     "Options:\n"
-                     "1. Disabled - does not generate second bridge layers. This is the default and is set for compatibility purposes\n"
-                     "2. External bridge only - generates second bridge layers for external-facing bridges only. Please note that small bridges that are shorter "
-                     "or narrower than the set number of perimeters will be skipped as they would not benefit from a second bridge layer. If generated, "
-                     "the second bridge layer will be extruded parallel to the first bridge layer to reinforce the bridge strength\n"
-                     "3. Internal bridge only - generates second bridge layers for internal bridges over sparse infill only. "
-                     "Please note that the internal bridges count towards the top shell layer count of your model. "
-                     "The second internal bridge layer will be extruded as close to perpendicular to the first as possible. "
-                     "If multiple regions in the same island, with varying bridge angles are present, the last region of that island will be selected as the angle reference\n"
-                     "4. Apply to all - generates second bridge layers for both internal and external-facing bridges\n");
-
-    def->enum_keys_map = &ConfigOptionEnum<EnableExtraBridgeLayer>::get_enum_values();
-    def->enum_values.push_back("disabled");
-    def->enum_values.push_back("external_bridge_only");
-    def->enum_values.push_back("internal_bridge_only");
-    def->enum_values.push_back("apply_to_all");
-    def->enum_labels.push_back(L("Disabled"));
-    def->enum_labels.push_back(L("External bridge only"));
-    def->enum_labels.push_back(L("Internal bridge only"));
-    def->enum_labels.push_back(L("Apply to all"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<EnableExtraBridgeLayer>(eblDisabled));
-
-    def = this->add("dont_filter_internal_bridges", coEnum);
-    def->label = L("Filter out small internal bridges");
-    def->category = L("Quality");
-    def->tooltip = L("This option can help reduce pillowing on top surfaces in heavily slanted or curved models.\n"
-                     "By default, small internal bridges are filtered out and the internal solid infill is printed "
-                     "directly over the sparse infill. This works well in most cases, speeding up printing without "
-                     "too much compromise on top surface quality.\n"
-                     "However, in heavily slanted or curved models, especially where too low a sparse infill density "
-                     "is used, this may result in curling of the unsupported solid infill, causing pillowing.\n"
-                     "Enabling limited filtering or no filtering will print internal bridge layer over slightly "
-                     "unsupported internal solid infill. The options below control the sensitivity of the filtering, "
-                     "i.e. they control where internal bridges are created:\n"
-                     "1. Filter - enables this option. This is the default behavior and works well in most cases\n"
-                     "2. Limited filtering - creates internal bridges on heavily slanted surfaces while avoiding "
-                     "unnecessary bridges. This works well for most difficult models\n"
-                     "3. No filtering - creates internal bridges on every potential internal overhang. This option is "
-                     "useful for heavily slanted top surface models; however, in most cases, it creates too many "
-                     "unnecessary bridges");
-    def->enum_keys_map = &ConfigOptionEnum<InternalBridgeFilter>::get_enum_values();
-    def->enum_values.push_back("disabled");
-    def->enum_values.push_back("limited");
-    def->enum_values.push_back("nofilter");
-    def->enum_labels.push_back(L("Filter"));
-    def->enum_labels.push_back(L("Limited filtering"));
-    def->enum_labels.push_back(L("No filtering"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<InternalBridgeFilter>(ibfDisabled));
-
-
-    def = this->add("max_bridge_length", coFloat);
-    def->label = L("Max bridge length");
-    def->category = L("Support");
-    def->tooltip = L("Max length of bridges that don't need support. Set it to 0 if you want all bridges to be supported, and set it to a very large value if you don't want any bridges to be supported.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10));
-
-    def = this->add("machine_end_gcode", coString);
-    def->label = L("End G-code");
-    def->tooltip = L("End G-code when finishing the entire print.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 12;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString("M104 S0 ; turn off temperature\nG28 X0  ; home X axis\nM84     ; disable motors\n"));
-
-    def             = this->add("printing_by_object_gcode", coString);
-    def->label      = L("Between Object G-code");
-    def->tooltip    = L("Insert G-code between objects. This parameter will only come into effect when you print your models object by object.");
-    def->multiline  = true;
-    def->full_width = true;
-    def->height     = 12;
-    def->mode       = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("filament_end_gcode", coStrings);
-    def->label = L("End G-code");
-    def->tooltip = L("End G-code when finishing the printing of this filament.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 120;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings { " " });
-
-    def = this->add("ensure_vertical_shell_thickness", coEnum);
-    def->label = L("Ensure vertical shell thickness");
-    def->category = L("Strength");
-    def->tooltip  = L(
-        "Add solid infill near sloping surfaces to guarantee the vertical shell thickness (top+bottom solid layers)\nNone: No solid infill "
-         "will be added anywhere. Caution: Use this option carefully if your model has sloped surfaces\nCritical Only: Avoid adding solid infill for walls\nModerate: Add solid infill for heavily "
-         "sloping surfaces only\nAll: Add solid infill for all suitable sloping surfaces\nDefault value is All.");
-    def->enum_keys_map = &ConfigOptionEnum<EnsureVerticalShellThickness>::get_enum_values();
-    def->enum_values.push_back("none");
-    def->enum_values.push_back("ensure_critical_only");
-    def->enum_values.push_back("ensure_moderate");
-    def->enum_values.push_back("ensure_all");
-    def->enum_labels.push_back(L("None"));
-    def->enum_labels.push_back(L("Critical Only"));
-    def->enum_labels.push_back(L("Moderate"));
-    def->enum_labels.push_back(L("All"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<EnsureVerticalShellThickness>(EnsureVerticalShellThickness::evstAll));
-    
-    auto def_top_fill_pattern = def = this->add("top_surface_pattern", coEnum);
-    def->label = L("Top surface pattern");
-    def->category = L("Strength");
-    def->tooltip = L("Line pattern of top surface infill.");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values.push_back("monotonic");
-    def->enum_values.push_back("monotonicline");
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("alignedrectilinear");
-    def->enum_values.push_back("concentric");
-    def->enum_values.push_back("hilbertcurve");
-    def->enum_values.push_back("archimedeanchords");
-    def->enum_values.push_back("octagramspiral");
-    def->enum_labels.push_back(L("Monotonic"));
-    def->enum_labels.push_back(L("Monotonic line"));
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Aligned Rectilinear"));
-    def->enum_labels.push_back(L("Concentric"));
-    def->enum_labels.push_back(L("Hilbert Curve"));
-    def->enum_labels.push_back(L("Archimedean Chords"));
-    def->enum_labels.push_back(L("Octagram Spiral"));
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
-
-    def = this->add("bottom_surface_pattern", coEnum);
-    def->label = L("Bottom surface pattern");
-    def->category = L("Strength");
-    def->tooltip = L("Line pattern of bottom surface infill, not bridge infill.");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values = def_top_fill_pattern->enum_values;
-    def->enum_labels = def_top_fill_pattern->enum_labels;
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonic));
-
-	def                = this->add("internal_solid_infill_pattern", coEnum);
-    def->label         = L("Internal solid infill pattern");
-    def->category      = L("Strength");
-    def->tooltip       = L("Line pattern of internal solid infill. if the detect narrow internal solid infill be enabled, the concentric pattern will be used for the small area.");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values   = def_top_fill_pattern->enum_values;
-    def->enum_labels   = def_top_fill_pattern->enum_labels;
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonic));
-    
-    def = this->add("outer_wall_line_width", coFloatOrPercent);
-    def->label = L("Outer wall");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of outer wall. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("outer_wall_speed", coFloat);
-    def->label = L("Outer wall");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of outer wall which is outermost and visible. "
-                     "It's used to be slower than inner wall speed to get better quality.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(60));
-
-    def = this->add("small_perimeter_speed", coFloatOrPercent);
-    def->label = L("Small perimeters");
-    def->category = L("Speed");
-    def->tooltip = L("This separate setting will affect the speed of perimeters having radius <= small_perimeter_threshold "
-                   "(usually holes). If expressed as percentage (for example: 80%) it will be calculated "
-                   "on the outer wall speed setting above. Set to zero for auto.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "outer_wall_speed";
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
-
-    def = this->add("small_perimeter_threshold", coFloat);
-    def->label = L("Small perimeters threshold");
-    def->category = L("Speed");
-    def->tooltip = L("This sets the threshold for small perimeter length. Default threshold is 0mm.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("wall_sequence", coEnum);
-    def->label = L("Walls printing order");
-    def->category = L("Quality");
-    def->tooltip = L("Print sequence of the internal (inner) and external (outer) walls.\n\n"
-                     "Use Inner/Outer for best overhangs. This is because the overhanging walls can adhere to a neighbouring perimeter while printing. "
-                     "However, this option results in slightly reduced surface quality as the external perimeter is deformed by being squashed to the internal perimeter.\n\n"
-                     "Use Inner/Outer/Inner for the best external surface finish and dimensional accuracy as the external wall is printed undisturbed from an internal perimeter. "
-                     "However, overhang performance will reduce as there is no internal perimeter to print the external wall against. "
-                     "This option requires a minimum of 3 walls to be effective as it prints the internal walls from the 3rd perimeter onwards first, "
-                     "then the external perimeter and, finally, the first internal perimeter. "
-                     "This option is recommended against the Outer/Inner option in most cases.\n\n"
-                     "Use Outer/Inner for the same external wall quality and dimensional accuracy benefits of Inner/Outer/Inner option. "
-                     "However, the z seams will appear less consistent as the first extrusion of a new layer starts on a visible surface.\n\n ");
-    def->enum_keys_map = &ConfigOptionEnum<WallSequence>::get_enum_values();
-    def->enum_values.push_back("inner wall/outer wall");
-    def->enum_values.push_back("outer wall/inner wall");
-    def->enum_values.push_back("inner-outer-inner wall");
-    def->enum_labels.push_back(L("Inner/Outer"));
-    def->enum_labels.push_back(L("Outer/Inner"));
-    def->enum_labels.push_back(L("Inner/Outer/Inner"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
-
-    def = this->add("is_infill_first",coBool);
-    def->label    = L("Print infill first");
-    def->tooltip  = L("Order of wall/infill. When the tickbox is unchecked the walls are printed first, which works best in most cases.\n\nPrinting infill first may help with extreme overhangs as the walls have the neighbouring infill to adhere to. However, the infill will slightly push out the printed walls where it is attached to them, resulting in a worse external surface finish. It can also cause the infill to shine through the external surfaces of the part.");
-    def->category = L("Quality");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionBool{false});
-
-    def = this->add("wall_direction", coEnum);
-    def->label = L("Wall loop direction");
-    def->category = L("Quality");
-    def->tooltip = L("The direction which the wall loops are extruded when looking down from the top.\n\nBy default all walls are extruded in counter-clockwise, unless Reverse on even is enabled. Set this to any option other than Auto will force the wall direction regardless of the Reverse on even.\n\nThis option will be disabled if spiral vase mode is enabled.");
-    def->enum_keys_map = &ConfigOptionEnum<WallDirection>::get_enum_values();
-    def->enum_values.push_back("auto");
-    def->enum_values.push_back("ccw");
-    def->enum_values.push_back("cw");
-    def->enum_labels.push_back(L("Auto"));
-    def->enum_labels.push_back(L("Counter clockwise"));
-    def->enum_labels.push_back(L("Clockwise"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
-
-    def = this->add("extruder", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Extruder");
-    def->category = L("Extruders");
-    //def->tooltip = L("The extruder to use (unless more specific extruder settings are specified). "
-    //               "This value overrides perimeter and infill extruders, but not the support extruders.");
-    def->min = 0;  // 0 = inherit defaults
-    def->enum_labels.push_back(L("default"));  // override label for item 0
-    def->enum_labels.push_back("1");
-    def->enum_labels.push_back("2");
-    def->enum_labels.push_back("3");
-    def->enum_labels.push_back("4");
-    def->enum_labels.push_back("5");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt{0});
-
-    def = this->add("extruder_clearance_height_to_rod", coFloat);
-    def->label = L("Height to rod");
-    def->tooltip = L("Distance of the nozzle tip to the lower rod. "
-        "Used for collision avoidance in by-object printing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(40));
-
-    // BBS
-    def = this->add("extruder_clearance_height_to_lid", coFloat);
-    def->label = L("Height to lid");
-    def->tooltip = L("Distance of the nozzle tip to the lid. "
-        "Used for collision avoidance in by-object printing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(120));
-
-    def = this->add("extruder_clearance_radius", coFloat);
-    def->label = L("Radius");
-    def->tooltip = L("Clearance radius around extruder. Used for collision avoidance in by-object printing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(40));
-
-    def = this->add("nozzle_height", coFloat);
-    def->label = L("Nozzle height");
-    def->tooltip = L("The height of nozzle tip.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloat(2.5));
-
-    def          = this->add("bed_mesh_min", coPoint);
-    def->label   = L("Bed mesh min");
-    def->tooltip = L(
-        "This option sets the min point for the allowed bed mesh area. Due to the probe's XY offset, most printers are unable to probe the "
-        "entire bed. To ensure the probe point does not go outside the bed area, the minimum and maximum points of the bed mesh should be "
-        "set appropriately. Snapmaker Orca ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
-        "points. This information can usually be obtained from your printer manufacturer. The default setting is (-99999, -99999), which "
-        "means there are no limits, thus allowing probing across the entire bed.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPoint(Vec2d(-99999, -99999)));
-
-    def          = this->add("bed_mesh_max", coPoint);
-    def->label   = L("Bed mesh max");
-    def->tooltip = L(
-        "This option sets the max point for the allowed bed mesh area. Due to the probe's XY offset, most printers are unable to probe the "
-        "entire bed. To ensure the probe point does not go outside the bed area, the minimum and maximum points of the bed mesh should be "
-        "set appropriately. Snapmaker_Orca ensures that adaptive_bed_mesh_min/adaptive_bed_mesh_max values do not exceed these min/max "
-        "points. This information can usually be obtained from your printer manufacturer. The default setting is (99999, 99999), which "
-        "means there are no limits, thus allowing probing across the entire bed.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPoint(Vec2d(99999, 99999)));
-
-    def          = this->add("bed_mesh_probe_distance", coPoint);
-    def->label   = L("Probe point distance");
-    def->tooltip = L("This option sets the preferred distance between probe points (grid size) for the X and Y directions, with the "
-                     "default being 50mm for both X and Y.");
-    def->min     = 0;
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionPoint(Vec2d(50, 50)));
-
-    def          = this->add("adaptive_bed_mesh_margin", coFloat);
-    def->label   = L("Mesh margin");
-    def->tooltip = L("This option determines the additional distance by which the adaptive bed mesh area should be expanded in the XY directions.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("extruder_colour", coStrings);
-    def->label = L("Extruder Color");
-    def->tooltip = L("Only used as a visual help on UI.");
-    def->gui_type = ConfigOptionDef::GUIType::color;
-    // Empty string means no color assigned yet.
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings { "" });
-
-    def = this->add("extruder_offset", coPoints);
-    def->label = L("Extruder offset");
-    //def->tooltip = L("If your firmware doesn't handle the extruder displacement you need the G-code "
-    //               "to take it into account. This option lets you specify the displacement of each extruder "
-    //               "with respect to the first one. It expects positive coordinates (they will be subtracted "
-    //               "from the XY coordinate).");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPoints { Vec2d(0,0) });
-
-    def = this->add("filament_flow_ratio", coFloats);
-    def->label = L("Flow ratio");
-    def->tooltip = L("The material may have volumetric change after switching between molten and crystalline states. "
-                     "This setting changes all extrusion flow of this filament in G-code proportionally. "
-                     "The recommended value range is between 0.95 and 1.05. "
-                     "You may be able to tune this value to get a nice flat surface if there is slight overflow or underflow.");
-    def->min = 0;
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 1. });
-
-    def = this->add("print_flow_ratio", coFloat);
-    def->label = L("Flow ratio");
-    def->tooltip = L("The material may have volumetric change after switching between molten and crystalline states. "
-                     "This setting changes all extrusion flow of this filament in G-code proportionally. "
-                     "The recommended value range is between 0.95 and 1.05. "
-                     "You may be able to tune this value to get a nice flat surface if there is slight overflow or underflow."
-                     "\n\nThe final object flow ratio is this value multiplied by the filament flow ratio.");
-    def->mode = comAdvanced;
-    def->max = 2;
-    def->min = 0.01;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("enable_pressure_advance", coBools);
-    def->label = L("Enable pressure advance");
-    def->tooltip = L("Enable pressure advance, auto calibration result will be overwritten once enabled.");
-    def->set_default_value(new ConfigOptionBools{ false });
-
-    def = this->add("pressure_advance", coFloats);
-    def->label = L("Pressure advance");
-    def->tooltip = L("Pressure advance (Klipper) AKA Linear advance factor (Marlin).");
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0.02 });
-    
-    // Orca: Adaptive pressure advance option and calibration values
-    def = this->add("adaptive_pressure_advance", coBools);
-    def->label = L("Enable adaptive pressure advance (beta)");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("With increasing print speeds (and hence increasing volumetric flow through the nozzle) and increasing accelerations, "
-                     "it has been observed that the effective PA value typically decreases. "
-                     "This means that a single PA value is not always 100% optimal for all features and a compromise value is usually used "
-                     "that does not cause too much bulging on features with lower flow speed and accelerations while also not causing gaps on faster features.\n\n"
-                     "This feature aims to address this limitation by modeling the response of your printer's extrusion system depending "
-                     "on the volumetric flow speed and acceleration it is printing at. Internally, it generates a fitted model that can extrapolate the needed pressure "
-                     "advance for any given volumetric flow speed and acceleration, which is then emitted to the printer depending on the current print conditions.\n\n"
-                     "When enabled, the pressure advance value above is overridden. However, a reasonable default value above is "
-                     "strongly recommended to act as a fallback and for when tool changing.\n\n");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools{ false });
-
-    // Orca: Adaptive pressure advance option and calibration values
-    def = this->add("adaptive_pressure_advance_model", coStrings);
-    def->label = L("Adaptive pressure advance measurements (beta)");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Add sets of pressure advance (PA) values, the volumetric flow speeds and accelerations they were measured at, separated by a comma. "
-                     "One set of values per line. For example\n"
-                     "0.04,3.96,3000\n0.033,3.96,10000\n0.029,7.91,3000\n0.026,7.91,10000\n\n"
-                     "How to calibrate:\n"
-                     "1. Run the pressure advance test for at least 3 speeds per acceleration value. It is recommended that the test is run "
-                     "for at least the speed of the external perimeters, the speed of the internal perimeters and the fastest feature "
-                     "print speed in your profile (usually its the sparse or solid infill). Then run them for the same speeds for the slowest and fastest print accelerations, "
-                     "and no faster than the recommended maximum acceleration as given by the Klipper input shaper\n"
-                     "2. Take note of the optimal PA value for each volumetric flow speed and acceleration. You can find the flow number by selecting "
-                     "flow from the color scheme drop down and move the horizontal slider over the PA pattern lines. The number should be visible "
-                     "at the bottom of the page. The ideal PA value should be decreasing the higher the volumetric flow is. "
-                     "If it is not, confirm that your extruder is functioning correctly. The slower and with less acceleration you print, "
-                     "the larger the range of acceptable PA values. If no difference is visible, use the PA value from the faster test\n"
-                     "3. Enter the triplets of PA values, Flow and Accelerations in the text box here and save your filament profile");
-    def->mode = comAdvanced;
-    //def->gui_flags = "serialized";
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 15;
-    def->set_default_value(new ConfigOptionStrings{"0,0,0\n0,0,0"});
-    
-    // xgettext:no-c-format, no-boost-format
-    def = this->add("adaptive_pressure_advance_overhangs", coBools);
-    def->label = L("Enable adaptive pressure advance for overhangs (beta)");
-    def->tooltip = L("Enable adaptive PA for overhangs as well as when flow changes within the same feature. This is an experimental option, "
-                     "as if the PA profile is not set accurately, it will cause uniformity issues on the external surfaces before and after overhangs.\n");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools{ false });
-
-    def = this->add("adaptive_pressure_advance_bridges", coFloats);
-    def->label = L("Pressure advance for bridges");
-    def->tooltip = L("Pressure advance value for bridges. Set to 0 to disable.\n\n"
-                     "A lower PA value when printing bridges helps reduce the appearance of slight under extrusion immediately after bridges. "
-                     "This is caused by the pressure drop in the nozzle when printing in the air and a lower PA helps counteract this.");
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0.0 });
-
-    def = this->add("line_width", coFloatOrPercent);
-    def->label = L("Default");
-    def->category = L("Quality");
-    def->tooltip = L("Default line width if other line widths are set to 0. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("reduce_fan_stop_start_freq", coBools);
-    def->label = L("Keep fan always on");
-    def->tooltip = L("Enabling this setting means that the part cooling fan will never stop completely "
-                     "and will run at least at minimum speed to reduce the frequency of starting and stopping.");
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("dont_slow_down_outer_wall", coBools);
-    def->label = L("Don't slow down outer walls");
-    def->tooltip = L("If enabled, this setting will ensure external perimeters are not slowed down to meet the minimum layer time. "
-                     "This is particularly helpful in the below scenarios:\n"
-                     "1. To avoid changes in shine when printing glossy filaments\n"
-                     "2. To avoid changes in external wall speed which may create slight wall artifacts that appear like Z banding\n"
-                     "3. To avoid printing at speeds which cause VFAs (fine artifacts) on the external walls");
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("fan_cooling_layer_time", coFloats);
-    def->label = L("Layer time");
-    def->tooltip = L("Part cooling fan will be enabled for layers of which estimated time is shorter than this value. "
-                     "Fan speed is interpolated between the minimum and maximum fan speeds according to layer printing time.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->max = 1000;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats{ 60.0f });
-
-    def           = this->add("default_filament_colour", coStrings);
-    def->label    = L("Default color");
-    def->tooltip  = L("Default filament color.\n"
-                      "Right click to reset value to system default.");
-    def->gui_type = ConfigOptionDef::GUIType::color;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings{""});
-
-    def = this->add("filament_colour", coStrings);
-    def->label = L("Color");
-    def->tooltip = L("Only used as a visual help on UI.");
-    def->gui_type = ConfigOptionDef::GUIType::color;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings{ "#F2754E" });
-
-    def = this->add("filament_multi_colors", coStrings);
-    def->label = L("Filament multi colors");
-    def->tooltip = L("Serialized filament color sequence. Multiple colors are separated by '|'.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionStrings{ "" });
-
-    def = this->add("filament_colour_mode", coInts);
-    def->label = L("Filament color display mode");
-    def->tooltip = L("Filament color display mode: 0 for split colors, 1 for gradient.");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->min = 0;
-    def->max = 1;
-    def->set_default_value(new ConfigOptionInts{ 0 });
-
-    def           = this->add("thumb0", coStrings);
-    def->label    = L("small thumb");
-    def->tooltip  = L("first small thumb");
-    def->mode     = comSimple;
-    def->set_default_value(new ConfigOptionString{""});
-
-    def          = this->add("thumb1", coStrings);
-    def->label   = L("big thumb");
-    def->tooltip = L("first big thumb");
-    def->mode    = comSimple;
-    def->set_default_value(new ConfigOptionString{""});
-
-    // PS
-    def = this->add("filament_notes", coStrings);
-    def->label = L("Filament notes");
-    def->tooltip = L("You can put your notes regarding the filament here.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 13;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings { "" });
-
-    //bbs
-    def          = this->add("required_nozzle_HRC", coInts);
-    def->label   = L("Required nozzle HRC");
-    def->tooltip = L("Minimum HRC of nozzle required to print the filament. Zero means no checking of nozzle's HRC.");
-    def->min     = 0;
-    def->max     = 500;
-    def->mode    = comDevelop;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("filament_max_volumetric_speed", coFloats);
-    def->label = L("Max volumetric speed");
-    def->tooltip = L("This setting stands for how much volume of filament can be melted and extruded per second. "
-                     "Printing speed is limited by max volumetric speed, in case of too high and unreasonable speed setting. "
-                     "Can't be zero.");
-    def->sidetext = u8"mmÂ³/s";	// cubic milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 2. });
-
-    def = this->add("machine_load_filament_time", coFloat);
-    def->label = L("Filament load time");
-    def->tooltip = L("Time to load new filament when switch filament. It's usually applicable for single-extruder multi-material machines. "
-                     "For tool changers or multi-tool machines, it's typically 0. For statistics only.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("machine_unload_filament_time", coFloat);
-    def->label = L("Filament unload time");
-    def->tooltip = L("Time to unload old filament when switch filament. It's usually applicable for single-extruder multi-material machines. "
-                     "For tool changers or multi-tool machines, it's typically 0. For statistics only.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("machine_tool_change_time", coFloat);
-    def->label = L("Tool change time");
-    def->tooltip = L("Time taken to switch tools. It's usually applicable for tool changers or multi-tool machines. "
-                     "For single-extruder multi-material machines, it's typically 0. For statistics only.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat { 0. });
-
-    def = this->add("tool_change_temprature_wait", coBool);
-    def->label = L("Wait for the temperature when changing tools");
-    def->tooltip = L("It will use the M109 instead of M104 T[target] after changing tools if this is set to true");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-
-    def = this->add("filament_diameter", coFloats);
-    def->label = L("Diameter");
-    def->tooltip = L("Filament diameter is used to calculate extrusion in G-code, so it is important and should be accurate.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloats { 1.75 });
-
-    /*
-        Large format printers with print volumes in the order of 1m^3 generally use pellets for printing.
-        The overall tech is very similar to FDM printing. 
-        It is FDM printing, but instead of filaments, it uses pellets.
-
-        The difference here is that where filaments have a filament_diameter that is used to calculate 
-        the volume of filament ingested, pellets have a particular flow_coefficient that is empirically 
-        devised for that particular pellet.
-
-        pellet_flow_coefficient is basically a measure of the packing density of a particular pellet.
-        Shape, material and density of an individual pellet will determine the packing density and
-        the only thing that matters for 3d printing is how much of that pellet material is extruded by 
-        one turn of whatever feeding mehcanism/gear your printer uses. You can emperically derive that
-        for your own pellets for a particular printer model.
-
-        We are translating the pellet_flow_coefficient into filament_diameter so that everything works just like it 
-        does already with very minor adjustments.
-
-        filament_diameter = sqrt( (4 * pellet_flow_coefficient) / PI )
-
-        sqrt just makes the relationship between flow_coefficient and volume linear.
-
-        higher packing density -> more material extruded by single turn -> higher pellet_flow_coefficient -> treated as if a filament of larger diameter is being used
-        All other calculations remain the same for slicing.
-    */
-
-    def = this->add("pellet_flow_coefficient", coFloats);
-    def->label = L("Pellet flow coefficient");
-    def->tooltip = L("Pellet flow coefficient is empirically derived and allows for volume calculation for pellet printers.\n\nInternally it is converted to filament_diameter. All other volume calculations remain the same.\n\nfilament_diameter = sqrt( (4 * pellet_flow_coefficient) / PI )");
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloats{ 0.4157 });
-
-    def = this->add("filament_shrink", coPercents);
-    def->label = L("Shrinkage (XY)");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Enter the shrinkage percentage that the filament will get after cooling (94% if you measure 94mm instead of 100mm)."
-        " The part will be scaled in xy to compensate."
-        " Only the filament used for the perimeter is taken into account."
-        "\nBe sure to allow enough space between objects, as this compensation is done after the checks.");
-    def->sidetext = "%";
-    def->ratio_over = "";
-    def->min = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercents{ 100 });
-    
-    def = this->add("filament_shrinkage_compensation_z", coPercents);
-    def->label = L("Shrinkage (Z)");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Enter the shrinkage percentage that the filament will get after cooling (94% if you measure 94mm instead of 100mm)."
-        " The part will be scaled in Z to compensate.");
-    def->sidetext = "%";
-    def->ratio_over = "";
-    def->min = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercents{ 100 });
-
-    def = this->add("filament_loading_speed", coFloats);
-    def->label = L("Loading speed");
-    def->tooltip = L("Speed used for loading the filament on the wipe tower.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 28. });
-
-    def = this->add("filament_loading_speed_start", coFloats);
-    def->label = L("Loading speed at the start");
-    def->tooltip = L("Speed used at the very beginning of loading phase.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 3. });
-
-    def = this->add("filament_unloading_speed", coFloats);
-    def->label = L("Unloading speed");
-    def->tooltip = L("Speed used for unloading the filament on the wipe tower (does not affect "
-                      "initial part of unloading just after ramming).");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 90. });
-
-    def = this->add("filament_unloading_speed_start", coFloats);
-    def->label = L("Unloading speed at the start");
-    def->tooltip = L("Speed used for unloading the tip of the filament immediately after ramming.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 100. });
-
-    def = this->add("filament_toolchange_delay", coFloats);
-    def->label = L("Delay after unloading");
-    def->tooltip = L("Time to wait after the filament is unloaded. "
-                   "May help to get reliable tool changes with flexible materials "
-                   "that may need more time to shrink to original dimensions.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("filament_cooling_moves", coInts);
-    def->label = L("Number of cooling moves");
-    def->tooltip = L("Filament is cooled by being moved back and forth in the "
-                   "cooling tubes. Specify desired number of these moves.");
-    def->max = 0;
-    def->max = 20;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 4 });
-
-    def = this->add("filament_stamping_loading_speed", coFloats);
-    def->label = L("Stamping loading speed");
-    def->tooltip = L("Speed used for stamping.");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("filament_stamping_distance", coFloats);
-    def->label = L("Stamping distance measured from the center of the cooling tube");
-    def->tooltip = L("If set to non-zero value, filament is moved toward the nozzle between the individual cooling moves (\"stamping\"). "
-                     "This option configures how long this movement should be before the filament is retracted again.");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("filament_cooling_initial_speed", coFloats);
-    def->label = L("Speed of the first cooling move");
-    def->tooltip = L("Cooling moves are gradually accelerating beginning at this speed.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 2.2 });
-
-    def = this->add("filament_minimal_purge_on_wipe_tower", coFloats);
-    def->label = L("Minimal purge on wipe tower");
-    def->tooltip = L("After a tool change, the exact position of the newly loaded filament inside "
-                     "the nozzle may not be known, and the filament pressure is likely not yet stable. "
-                     "Before purging the print head into an infill or a sacrificial object, Snapmaker Orca will always prime "
-                     "this amount of material into the wipe tower to produce successive infill or sacrificial object extrusions reliably.");
-    def->sidetext = u8"mmÂ³";	// cubic milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 15. });
-
-    def = this->add("filament_cooling_final_speed", coFloats);
-    def->label = L("Speed of the last cooling move");
-    def->tooltip = L("Cooling moves are gradually accelerating towards this speed.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 3.4 });
-
-    def = this->add("filament_ramming_parameters", coStrings);
-    def->label = L("Ramming parameters");
-    def->tooltip = L("This string is edited by RammingDialog and contains ramming specific parameters.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings { "120 100 6.6 6.8 7.2 7.6 7.9 8.2 8.7 9.4 9.9 10.0|"
-       " 0.05 6.6 0.45 6.8 0.95 7.8 1.45 8.3 1.95 9.7 2.45 10 2.95 7.6 3.45 7.6 3.95 7.6 4.45 7.6 4.95 7.6" });
-
-    def = this->add("filament_multitool_ramming", coBools);
-    def->label = L("Enable ramming for multi-tool setups");
-    def->tooltip = L("Perform ramming when using multi-tool printer (i.e. when the 'Single Extruder Multimaterial' in Printer Settings is unchecked). "
-                     "When checked, a small amount of filament is rapidly extruded on the wipe tower just before the tool change. "
-                     "This option is only used when the wipe tower is enabled.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("filament_multitool_ramming_volume", coFloats);
-    def->label = L("Multi-tool ramming volume");
-    def->tooltip = L("The volume to be rammed before the tool change.");
-    def->sidetext = u8"mmÂ³";	// cubic milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 10. });
-
-    def = this->add("filament_multitool_ramming_flow", coFloats);
-    def->label = L("Multi-tool ramming flow");
-    def->tooltip = L("Flow used for ramming the filament before the tool change.");
-    def->sidetext = u8"mmÂ³/s";	// cubic milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 10. });
-    
-    def = this->add("filament_density", coFloats);
-    def->label = L("Density");
-    def->tooltip = L("Filament density. For statistics only.");
-    def->sidetext = u8"g/cmÂ³";	// grams per cubic milimeter, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("filament_type", coStrings);
-    def->label = L("Type");
-    def->tooltip = L("The material type of filament.");
-    def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
-    def->gui_flags = "show_value";
-
-    def->enum_values.push_back("ABS");
-    def->enum_values.push_back("ABS-GF");
-    def->enum_values.push_back("ASA");
-    def->enum_values.push_back("ASA-Aero");
-    def->enum_values.push_back("BVOH");
-    def->enum_values.push_back("PCTG");
-    def->enum_values.push_back("EVA");
-    def->enum_values.push_back("FLEX");
-    def->enum_values.push_back("HIPS");
-    def->enum_values.push_back("PA");
-    def->enum_values.push_back("PA-CF");
-    def->enum_values.push_back("PA-GF");
-    def->enum_values.push_back("PA6-CF");
-    def->enum_values.push_back("PA11-CF");
-    def->enum_values.push_back("PC");
-    def->enum_values.push_back("PC-CF");
-    def->enum_values.push_back("PCTG");
-    def->enum_values.push_back("PE");
-    def->enum_values.push_back("PE-CF");
-    def->enum_values.push_back("PET-CF");
-    def->enum_values.push_back("PETG");
-    def->enum_values.push_back("PETG-CF");
-    def->enum_values.push_back("PETG-CF10");
-    def->enum_values.push_back("PETG-GF");
-    def->enum_values.push_back("PHA");
-    def->enum_values.push_back("PLA");
-    def->enum_values.push_back("PLA-AERO");
-    def->enum_values.push_back("PLA-CF");
-    def->enum_values.push_back("PP");
-    def->enum_values.push_back("PP-CF");
-    def->enum_values.push_back("PP-GF");
-    def->enum_values.push_back("PPA-CF");
-    def->enum_values.push_back("PPA-GF");
-    def->enum_values.push_back("PPS");
-    def->enum_values.push_back("PPS-CF");
-    def->enum_values.push_back("PVA");
-    def->enum_values.push_back("PVB");
-    def->enum_values.push_back("SBS");
-    def->enum_values.push_back("TPU");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionStrings { "PLA" });
-
-    def = this->add("filament_soluble", coBools);
-    def->label = L("Soluble material");
-    def->tooltip = L("Soluble material is commonly used to print supports and support interfaces.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("filament_is_support", coBools);
-    def->label = L("Support material");
-    def->tooltip = L("Support material is commonly used to print supports and support interfaces.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def          = this->add("filament_is_high_temperature", coBools);
-    def->label   = L("Is high-temperature filament");
-    def->tooltip = L("Indicates whether this is a high-temperature filament that requires elevated printing temperatures.");
-    def->mode    = comSimple;
-    def->set_default_value(new ConfigOptionBools{false});
-
-    // BBS
-    def = this->add("temperature_vitrification", coInts);
-    def->label = L("Softening temperature");
-    def->tooltip = L("The material softens at this temperature, so when the bed temperature is equal to or greater than this, "
-                     "it's highly recommended to open the front door and/or remove the upper glass to avoid clogging.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInts{ 100 });
-
-    def = this->add("filament_cost", coFloats);
-    def->label = L("Price");
-    def->tooltip = L("Filament price. For statistics only.");
-    def->sidetext = L("money/kg");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("filament_settings_id", coStrings);
-    def->set_default_value(new ConfigOptionStrings { "" });
-    //BBS: open this option to command line
-    //def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("filament_ids", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("filament_vendor", coStrings);
-    def->label = L("Vendor");
-    def->tooltip = L("Vendor of filament. For show only.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings{L("(Undefined)")});
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("infill_direction", coFloat);
-    def->label = L("Sparse infill direction");
-    def->category = L("Strength");
-    def->tooltip = L("Angle for sparse infill pattern, which controls the start or main direction of line.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 360;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(45));
-
-    def = this->add("solid_infill_direction", coFloat);
-    def->label = L("Solid infill direction");
-    def->category = L("Strength");
-    def->tooltip = L("Angle for solid infill pattern, which controls the start or main direction of line.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 360;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(45));
-
-    def = this->add("sparse_infill_density", coPercent);
-    def->label = L("Sparse infill density");
-    def->category = L("Strength");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Density of internal sparse infill, 100% turns all sparse infill into solid infill and internal solid infill pattern will be used.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
-    def->set_default_value(new ConfigOptionPercent(20));
-        
-    def           = this->add("align_infill_direction_to_model", coBool);
-    def->label    = L("Align infill direction to model");
-    def->category = L("Strength");
-    def->tooltip  = L("Aligns infill and surface fill directions to follow the model's orientation on the build plate. When enabled, fill directions rotate with the model to maintain optimal strength characteristics.");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def           = this->add("extra_solid_infills", coString);
-    def->label    = L("Insert solid layers");
-    def->category = L("Strength");
-    def->tooltip  = L("Insert solid infill at specific layers. Use N to insert every Nth layer, N#K to insert K consecutive solid layers every N layers (K is optional, e.g. '5#' equals '5#1'), or a comma-separated list (e.g. 1,7,9) to insert at explicit layers. Layers are 1-based.");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-
-    // Infill multiline
-    def             = this->add("fill_multiline", coInt);
-    def->label      = L("Fill Multiline");
-    def->tooltip    = L("Using multiple lines for the infill pattern, if supported by infill pattern.");
-    def->min = 1;
-    def->max = 5; // Maximum number of lines for infill pattern
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("sparse_infill_pattern", coEnum);
-    def->label = L("Sparse infill pattern");
-    def->category = L("Strength");
-    def->tooltip = L("Line pattern for internal sparse infill.");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("alignedrectilinear");
-    def->enum_values.push_back("zigzag");
-    def->enum_values.push_back("crosszag");
-    def->enum_values.push_back("lockedzag");
-    def->enum_values.push_back("line");
-    def->enum_values.push_back("grid");
-    def->enum_values.push_back("triangles");
-    def->enum_values.push_back("tri-hexagon");
-    def->enum_values.push_back("cubic");
-    def->enum_values.push_back("adaptivecubic");
-    def->enum_values.push_back("quartercubic");
-    def->enum_values.push_back("supportcubic");
-    def->enum_values.push_back("lightning");
-    def->enum_values.push_back("honeycomb");
-    def->enum_values.push_back("3dhoneycomb");
-    def->enum_values.push_back("lateral-honeycomb");
-    def->enum_values.push_back("lateral-lattice");
-    def->enum_values.push_back("crosshatch");
-    def->enum_values.push_back("tpmsd");
-    def->enum_values.push_back("tpmsfk");
-    def->enum_values.push_back("gyroid");
-    def->enum_values.push_back("concentric");
-    def->enum_values.push_back("hilbertcurve");
-    def->enum_values.push_back("archimedeanchords");
-    def->enum_values.push_back("octagramspiral");
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Aligned Rectilinear"));
-    def->enum_labels.push_back(L("Zig Zag"));
-    def->enum_labels.push_back(L("Cross Zag"));
-    def->enum_labels.push_back(L("Locked Zag"));
-    def->enum_labels.push_back(L("Line"));
-    def->enum_labels.push_back(L("Grid"));
-    def->enum_labels.push_back(L("Triangles"));
-    def->enum_labels.push_back(L("Tri-hexagon"));
-    def->enum_labels.push_back(L("Cubic"));
-    def->enum_labels.push_back(L("Adaptive Cubic"));
-    def->enum_labels.push_back(L("Quarter Cubic"));
-    def->enum_labels.push_back(L("Support Cubic"));
-    def->enum_labels.push_back(L("Lightning"));
-    def->enum_labels.push_back(L("Honeycomb"));
-    def->enum_labels.push_back(L("3D Honeycomb"));
-    def->enum_labels.push_back(L("Lateral Honeycomb"));
-    def->enum_labels.push_back(L("Lateral Lattice"));
-    def->enum_labels.push_back(L("Cross Hatch"));
-    def->enum_labels.push_back(L("TPMS-D"));
-    def->enum_labels.push_back(L("TPMS-FK"));
-    def->enum_labels.push_back(L("Gyroid"));
-    def->enum_labels.push_back(L("Concentric"));
-    def->enum_labels.push_back(L("Hilbert Curve"));
-    def->enum_labels.push_back(L("Archimedean Chords"));
-    def->enum_labels.push_back(L("Octagram Spiral"));
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCrossHatch));
-
-    def           = this->add("lateral_lattice_angle_1", coFloat);
-    def->label    = L("Lateral lattice angle 1");
-    def->category = L("Strength");
-    def->tooltip  = L("The angle of the first set of Lateral lattice elements in the Z direction. Zero is vertical.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min      = -75;
-    def->max      = 75;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(-45));
-
-    def           = this->add("lateral_lattice_angle_2", coFloat);
-    def->label    = L("Lateral lattice angle 2");
-    def->category = L("Strength");
-    def->tooltip  = L("The angle of the second set of Lateral lattice elements in the Z direction. Zero is vertical.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min      = -75;
-    def->max      = 75;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(45));
-
-    def           = this->add("infill_overhang_angle", coFloat);
-    def->label    = L("Infill overhang angle");
-    def->category = L("Strength");
-    def->tooltip  = L("The angle of the infill angled lines. 60Â° will result in a pure honeycomb.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min      = 15;
-    def->max      = 75;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(60));
-
-    auto def_infill_anchor_min = def = this->add("infill_anchor", coFloatOrPercent);
-    def->label = L("Sparse infill anchor length");
-    def->category = L("Strength");
-    def->tooltip = L("Connect an infill line to an internal perimeter with a short segment of an additional perimeter. "
-                     "If expressed as percentage (example: 15%) it is calculated over infill extrusion width. "
-                     "Snapmaker Orca tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
-                     "shorter than infill_anchor_max is found, the infill line is connected to a perimeter segment at just one side "
-                     "and the length of the perimeter segment taken is limited to this parameter, but no longer than anchor_length_max.\n"
-                     "Set this parameter to zero to disable anchoring perimeters connected to a single infill line.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "sparse_infill_line_width";
-    def->max_literal = 1000;
-    def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
-    def->enum_values.push_back("0");
-    def->enum_values.push_back("1");
-    def->enum_values.push_back("2");
-    def->enum_values.push_back("5");
-    def->enum_values.push_back("10");
-    def->enum_values.push_back("1000");
-    def->enum_labels.push_back(L("0 (no open anchors)"));
-    def->enum_labels.push_back("1 mm");
-    def->enum_labels.push_back("2 mm");
-    def->enum_labels.push_back("5 mm");
-    def->enum_labels.push_back("10 mm");
-    def->enum_labels.push_back(L("1000 (unlimited)"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(400, true));
-
-    def = this->add("infill_anchor_max", coFloatOrPercent);
-    def->label = L("Maximum length of the infill anchor");
-    def->category = L("Strength");
-    def->tooltip = L("Connect an infill line to an internal perimeter with a short segment of an additional perimeter. "
-                     "If expressed as percentage (example: 15%) it is calculated over infill extrusion width. "
-                     "Snapmaker Orca tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment "
-                     "shorter than this parameter is found, the infill line is connected to a perimeter segment at just one side "
-                     "and the length of the perimeter segment taken is limited to infill_anchor, but no longer than this parameter.\n"
-                     "If set to 0, the old algorithm for infill connection will be used, it should create the same result as with 1000 & 0.");
-    def->sidetext    = def_infill_anchor_min->sidetext;
-    def->ratio_over  = def_infill_anchor_min->ratio_over;
-    def->gui_type    = def_infill_anchor_min->gui_type;
-    def->enum_values = def_infill_anchor_min->enum_values;
-    def->max_literal = def_infill_anchor_min->max_literal;
-    def->enum_labels.push_back(L("0 (Simple connect)"));
-    def->enum_labels.push_back("1 mm");
-    def->enum_labels.push_back("2 mm");
-    def->enum_labels.push_back("5 mm");
-    def->enum_labels.push_back("10 mm");
-    def->enum_labels.push_back(L("1000 (unlimited)"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(20, false));
-
-    def = this->add("outer_wall_acceleration", coFloat);
-    def->label = L("Outer wall");
-    def->tooltip = L("Acceleration of outer walls.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10000));
-
-    def = this->add("inner_wall_acceleration", coFloat);
-    def->label = L("Inner wall");
-    def->tooltip = L("Acceleration of inner walls.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10000));
-
-    def = this->add("travel_acceleration", coFloat);
-    def->label = L("Travel");
-    def->tooltip = L("Acceleration of travel moves.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10000));
-
-    def = this->add("top_surface_acceleration", coFloat);
-    def->label = L("Top surface");
-    def->tooltip = L("Acceleration of top surface infill. Using a lower value may improve top surface quality.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(500));
-
-    def = this->add("outer_wall_acceleration", coFloat);
-    def->label = L("Outer wall");
-    def->tooltip = L("Acceleration of outer wall. Using a lower value can improve quality.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(500));
-
-    def = this->add("bridge_acceleration", coFloatOrPercent);
-    def->label = L("Bridge");
-    def->tooltip = L("Acceleration of bridges. If the value is expressed as a percentage (e.g. 50%), it will be calculated based on the outer wall acceleration.");
-    def->sidetext = L("mm/sÂ² or %");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->ratio_over = "outer_wall_acceleration";
-    def->set_default_value(new ConfigOptionFloatOrPercent(50,true));
-
-    def = this->add("sparse_infill_acceleration", coFloatOrPercent);
-    def->label = L("Sparse infill");
-    def->tooltip = L("Acceleration of sparse infill. If the value is expressed as a percentage (e.g. 100%), it will be calculated based on the default acceleration.");
-    def->sidetext = L("mm/sÂ² or %");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->ratio_over = "default_acceleration";
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def = this->add("internal_solid_infill_acceleration", coFloatOrPercent);
-    def->label = L("Internal solid infill");
-    def->tooltip = L("Acceleration of internal solid infill. If the value is expressed as a percentage (e.g. 100%), it will be calculated based on the default acceleration.");
-    def->sidetext = L("mm/sÂ² or %");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->ratio_over = "default_acceleration";
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def = this->add("initial_layer_acceleration", coFloat);
-    def->label = L("Initial layer");
-    def->tooltip = L("Acceleration of initial layer. Using a lower value can improve build plate adhesion.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(300));
-
-    def = this->add("accel_to_decel_enable", coBool);
-    def->label = L("Enable accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-    
-    def = this->add("accel_to_decel_factor", coPercent);
-    def->label = L("accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration.");
-    def->sidetext = "%";
-    def->min = 1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(50));
-    
-    def = this->add("default_jerk", coFloat);
-    def->label = L("Default");
-    def->tooltip = L("Default jerk.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("default_junction_deviation", coFloat);
-    def->label = L("Junction Deviation");
-    def->tooltip = L("Marlin Firmware Junction Deviation (replaces the traditional XY Jerk setting).");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("outer_wall_jerk", coFloat);
-    def->label = L("Outer wall");
-    def->tooltip = L("Jerk of outer walls.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(9));
-
-    def = this->add("inner_wall_jerk", coFloat);
-    def->label = L("Inner wall");
-    def->tooltip = L("Jerk of inner walls.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(9));
-
-    def = this->add("top_surface_jerk", coFloat);
-    def->label = L("Top surface");
-    def->tooltip = L("Jerk for top surface.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(9));
-
-    def = this->add("infill_jerk", coFloat);
-    def->label = L("Infill");
-    def->tooltip = L("Jerk for infill.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(9));
-
-    def = this->add("initial_layer_jerk", coFloat);
-    def->label = L("Initial layer");
-    def->tooltip = L("Jerk for initial layer.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(9));
-
-    def = this->add("travel_jerk", coFloat);
-    def->label = L("Travel");
-    def->tooltip = L("Jerk for travel.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(12));
-
-    def = this->add("initial_layer_line_width", coFloatOrPercent);
-    def->label = L("Initial layer");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of initial layer. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-
-    def = this->add("initial_layer_print_height", coFloat);
-    def->label = L("Initial layer height");
-    def->category = L("Quality");
-    def->tooltip = L("Height of initial layer. Making initial layer height to be thick slightly can improve build plate adhesion.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    //def = this->add("adaptive_layer_height", coBool);
-    //def->label = L("Adaptive layer height");
-    //def->category = L("Quality");
-    //def->tooltip = L("Enabling this option means the height of every layer except the first will be automatically calculated "
-    //    "during slicing according to the slope of the modelâ€™s surface.\n"
-    //    "Note that this option only takes effect if no prime tower is generated in current plate.");
-    //def->set_default_value(new ConfigOptionBool(0));
-
-    def = this->add("initial_layer_speed", coFloat);
-    def->label = L("Initial layer");
-    def->tooltip = L("Speed of initial layer except the solid infill part.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(30));
-
-    def = this->add("initial_layer_infill_speed", coFloat);
-    def->label = L("Initial layer infill");
-    def->tooltip = L("Speed of solid infill part of initial layer.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(60.0));
-
-    def = this->add("initial_layer_travel_speed", coFloatOrPercent);
-    def->label = L("Initial layer travel speed");
-    def->tooltip = L("Travel speed of initial layer.");
-    def->category = L("Speed");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "travel_speed";
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def = this->add("slow_down_layers", coInt);
-    def->label = L("Number of slow layers");
-    def->tooltip = L("The first few layers are printed slower than normal. "
-                     "The speed is gradually increased in a linear fashion over the specified number of layers.");
-    def->category = L("Speed");
-    def->sidetext = L("layers"); // ORCA add side text
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("nozzle_temperature_initial_layer", coInts);
-    def->label = L("Initial layer");
-    def->full_label = L("Initial layer nozzle temperature");
-    def->tooltip = L("Nozzle temperature for printing initial layer when using this filament.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts { 200 });
-
-    def = this->add("full_fan_speed_layer", coInts);
-    def->label = L("Full fan speed at layer");
-    def->tooltip = L("Fan speed will be ramped up linearly from zero at layer \"close_fan_the_first_x_layers\" "
-                  "to maximum at layer \"full_fan_speed_layer\". "
-                  "\"full_fan_speed_layer\" will be ignored if lower than \"close_fan_the_first_x_layers\", in which case "
-                  "the fan will be running at maximum allowed speed at layer \"close_fan_the_first_x_layers\" + 1.");
-    def->sidetext = L("layer"); // ORCA add side text
-    def->min = 0;
-    def->max = 1000;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 0 });
-    
-    def = this->add("support_material_interface_fan_speed", coInts);
-    def->label = L("Support interface fan speed");
-    def->tooltip = L("This part cooling fan speed is applied when printing support interfaces. Setting this parameter to a higher than regular speed "
-                     "reduces the layer binding strength between supports and the supported part, making them easier to separate."
-                    "\nSet to -1 to disable it."
-                     "\nThis setting is overridden by disable_fan_first_layers.");
-    def->sidetext = "%";
-    def->min = -1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts{ -1 });
-    
-    // ORCA: Add support for separate internal bridge fan speed control
-    def = this->add("internal_bridge_fan_speed", coInts);
-    def->label = L("Internal bridges fan speed");
-    def->tooltip = L("The part cooling fan speed used for all internal bridges. Set to -1 to use the overhang fan speed settings instead.\n\n"
-                     "Reducing the internal bridges fan speed, compared to your regular fan speed, can help reduce part warping due to excessive "
-                     "cooling applied over a large surface for a prolonged period of time.");
-    def->sidetext = "%";
-    def->min = -1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts{ -1 });
-    
-    def = this->add("ironing_fan_speed", coInts);
-    def->label = L("Ironing fan speed");
-    def->tooltip = L("This part cooling fan speed is applied when ironing. Setting this parameter to a lower than regular speed "
-                     "reduces possible nozzle clogging due to the low volumetric flow rate, making the interface smoother."
-                    "\nSet to -1 to disable it.");
-    def->sidetext = "%";
-    def->min = -1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts{ -1 });
-
-    def = this->add("fuzzy_skin", coEnum);
-    def->label = L("Fuzzy Skin");
-    def->category = L("Others");
-    def->tooltip = L("Randomly jitter while printing the wall, so that the surface has a rough look. This setting controls "
-                     "the fuzzy position.");
-    def->enum_keys_map = &ConfigOptionEnum<FuzzySkinType>::get_enum_values();
-    def->enum_values.push_back("none");
-    def->enum_values.push_back("external");
-    def->enum_values.push_back("all");
-    def->enum_values.push_back("allwalls");
-    def->enum_labels.push_back(L("None"));
-    def->enum_labels.push_back(L("Contour"));
-    def->enum_labels.push_back(L("Contour and hole"));
-    def->enum_labels.push_back(L("All walls"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
-
-    def = this->add("fuzzy_skin_thickness", coFloat);
-    def->label = L("Fuzzy skin thickness");
-    def->category = L("Others");
-    def->tooltip = L("The width within which to jitter. It's advised to be below outer wall line width.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 1;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("fuzzy_skin_point_distance", coFloat);
-    def->label = L("Fuzzy skin point distance");
-    def->category = L("Others");
-    def->tooltip = L("The average distance between the random points introduced on each line segment.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 5;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(0.3));
-
-    def = this->add("fuzzy_skin_first_layer", coBool);
-    def->label = L("Apply fuzzy skin to first layer");
-    def->category = L("Others");
-    def->tooltip = L("Whether to apply fuzzy skin on the first layer.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(0));
-
-    def = this->add("fuzzy_skin_mode", coEnum);
-    def->label = L("Fuzzy skin generator mode");
-    def->category = L("Others");
-    def->tooltip = L("Fuzzy skin generation mode. Works only with Arachne!\n"
-                     "Displacement: Ð¡lassic mode when the pattern is formed by shifting the nozzle sideways from the original path.\n"
-                     "Extrusion: The mode when the pattern formed by the amount of extruded plastic. "
-                     "This is the fast and straight algorithm without unnecessary nozzle shake that gives a smooth pattern. "
-                     "But it is more useful for forming loose walls in the entire they array.\n"
-                     "Combined: Joint mode [Displacement] + [Extrusion]. The appearance of the walls is similar to [Displacement] Mode, but it leaves no pores between the perimeters.\n\n"
-                     "Attention! The [Extrusion] and [Combined] modes works only the fuzzy_skin_thickness parameter not more than the thickness of printed loop. "
-                     "At the same time, the width of the extrusion for a particular layer should also not be below a certain level. "
-                     "It is usually equal 15-25%% of a layer height. Therefore, the maximum fuzzy skin thickness with a perimeter width of 0.4 mm and a layer height of 0.2 mm will be 0.4-(0.2*0.25)=Â±0.35mm! "
-                     "If you enter a higher parameter than this, the error Flow::spacing() will displayed, and the model will not be sliced. You can choose this number until this error is repeated." );
-    def->enum_keys_map = &ConfigOptionEnum<FuzzySkinMode>::get_enum_values();
-    def->enum_values.push_back("displacement");
-    def->enum_values.push_back("extrusion");
-    def->enum_values.push_back("combined");
-    def->enum_labels.push_back(L("Displacement"));
-    def->enum_labels.push_back(L("Extrusion"));
-    def->enum_labels.push_back(L("Combined"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<FuzzySkinMode>(FuzzySkinMode::Displacement));
-
-    def = this->add("fuzzy_skin_noise_type", coEnum);
-    def->label = L("Fuzzy skin noise type");
-    def->category = L("Others");
-    def->tooltip = L("Noise type to use for fuzzy skin generation:\n"
-                     "Classic: Classic uniform random noise.\n"
-                     "Perlin: Perlin noise, which gives a more consistent texture.\n"
-                     "Billow: Similar to perlin noise, but clumpier.\n"
-                     "Ridged Multifractal: Ridged noise with sharp, jagged features. Creates marble-like textures.\n"
-                     "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.");
-    def->enum_keys_map = &ConfigOptionEnum<NoiseType>::get_enum_values();
-    def->enum_values.push_back("classic");
-    def->enum_values.push_back("perlin");
-    def->enum_values.push_back("billow");
-    def->enum_values.push_back("ridgedmulti");
-    def->enum_values.push_back("voronoi");
-    def->enum_labels.push_back(L("Classic"));
-    def->enum_labels.push_back(L("Perlin"));
-    def->enum_labels.push_back(L("Billow"));
-    def->enum_labels.push_back(L("Ridged Multifractal"));
-    def->enum_labels.push_back(L("Voronoi"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<NoiseType>(NoiseType::Classic));
-
-    def = this->add("fuzzy_skin_scale", coFloat);
-    def->label = L("Fuzzy skin feature size");
-    def->category = L("Others");
-    def->tooltip = L("The base size of the coherent noise features, in mm. Higher values will result in larger features.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0.1;
-    def->max = 500;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("fuzzy_skin_octaves", coInt);
-    def->label = L("Fuzzy Skin Noise Octaves");
-    def->category = L("Others");
-    def->tooltip = L("The number of octaves of coherent noise to use. Higher values increase the detail of the noise, but also increase computation time.");
-    def->min = 1;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(4));
-
-    def = this->add("fuzzy_skin_persistence", coFloat);
-    def->label = L("Fuzzy skin noise persistence");
-    def->category = L("Others");
-    def->tooltip = L("The decay rate for higher octaves of the coherent noise. Lower values will result in smoother noise.");
-    def->min = 0.01;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("filter_out_gap_fill", coFloat);
-    def->label = L("Filter out tiny gaps");
-    def->category = L("Layers and Perimeters");
-    def->tooltip = L("Don't print gap fill with a length is smaller than the threshold specified (in mm). This setting applies to top, "
-                     "bottom and solid infill and, if using the classic perimeter generator, to wall gap fill.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-    
-    def = this->add("gap_infill_speed", coFloat);
-    def->label = L("Gap infill");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of gap infill. Gap usually has irregular line width and should be printed more slowly.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(30));
-
-    // BBS
-    def          = this->add("precise_z_height", coBool);
-    def->label   = L("Precise Z height");
-    def->tooltip = L("Enable this to get precise z height of object after slicing. "
-                     "It will get the precise object height by fine-tuning the layer heights of the last few layers. "
-                     "Note that this is an experimental parameter.");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(0));
-
-    // BBS
-    def = this->add("enable_arc_fitting", coBool);
-    def->label = L("Arc fitting");
-    def->tooltip = L("Enable this to get a G-code file which has G2 and G3 moves. "
-                     "The fitting tolerance is same as the resolution.\n\n"
-                     "Note: For Klipper machines, this option is recommended to be disabled. Klipper does not benefit from "
-                     "arc commands as these are split again into line segments by the firmware. This results in a reduction "
-                     "in surface quality as line segments are converted to arcs by the slicer and then back to line segments "
-                     "by the firmware.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(0));
-    // BBS
-    def = this->add("gcode_add_line_number", coBool);
-    def->label = L("Add line number");
-    def->tooltip = L("Enable this to add line number(Nx) at the beginning of each G-code line.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(0));
-
-    // BBS
-    def = this->add("scan_first_layer", coBool);
-    def->label = L("Scan first layer");
-    def->tooltip = L("Enable this to enable the camera on printer to check the quality of first layer.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-
-    //BBS
-    // def = this->add("spaghetti_detector", coBool);
-    // def->label = L("Enable spaghetti detector");
-    // def->tooltip = L("Enable the camera on printer to check spaghetti.");
-    // def->mode = comSimple;
-    // def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("nozzle_type", coEnum);
-    def->label = L("Nozzle type");
-    def->tooltip = L("The metallic material of nozzle. This determines the abrasive resistance of nozzle, and "
-                     "what kind of filament can be printed.");
-    def->enum_keys_map = &ConfigOptionEnum<NozzleType>::get_enum_values();
-    def->enum_values.push_back("undefine");
-    def->enum_values.push_back("hardened_steel");
-    def->enum_values.push_back("stainless_steel");
-    def->enum_values.push_back("brass");
-    def->enum_labels.push_back(L("Undefine"));
-    def->enum_labels.push_back(L("Hardened steel"));
-    def->enum_labels.push_back(L("Stainless steel"));
-    def->enum_labels.push_back(L("Brass"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<NozzleType>(ntUndefine));
-
-
-    def                = this->add("nozzle_hrc", coInt);
-    def->label         = L("Nozzle HRC");
-    def->tooltip       = L("The nozzle's hardness. Zero means no checking for nozzle's hardness during slicing.");
-    def->sidetext      = L("HRC");
-    def->min           = 0;
-    def->max           = 500;
-    def->mode          = comDevelop;
-    def->set_default_value(new ConfigOptionInt{0});
-
-    def = this->add("printer_structure", coEnum);
-    def->label = L("Printer structure");
-    def->tooltip = L("The physical arrangement and components of a printing device.");
-    def->enum_keys_map = &ConfigOptionEnum<PrinterStructure>::get_enum_values();
-    def->enum_values.push_back("undefine");
-    def->enum_values.push_back("corexy");
-    def->enum_values.push_back("i3");
-    def->enum_values.push_back("hbot");
-    def->enum_values.push_back("delta");
-    def->enum_labels.push_back(L("Undefine"));
-    def->enum_labels.push_back(L("CoreXY"));
-    def->enum_labels.push_back(L("I3"));
-    def->enum_labels.push_back(L("Hbot"));
-    def->enum_labels.push_back(L("Delta"));
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionEnum<PrinterStructure>(psUndefine));
-
-    def = this->add("best_object_pos", coPoint);
-    def->label = L("Best object position");
-    def->tooltip = L("Best auto arranging position in range [0,1] w.r.t. bed shape.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPoint(Vec2d(0.5, 0.5)));
-
-    def = this->add("auxiliary_fan", coBool);
-    def->label = L("Auxiliary part cooling fan");
-    def->tooltip = L("Enable this option if machine has auxiliary part cooling fan. G-code command: M106 P2 S(0-255).");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("fan_speedup_time", coFloat);
-	// Label is set in Tab.cpp in the Line object.
-    //def->label = L("Fan speed-up time");
-    def->tooltip = L("Start the fan this number of seconds earlier than its target start time (you can use fractional seconds)."
-        " It assumes infinite acceleration for this time estimation, and will only take into account G1 and G0 moves (arc fitting"
-        " is unsupported)."
-        "\nIt won't move fan commands from custom G-code (they act as a sort of 'barrier')."
-        "\nIt won't move fan commands into the start G-code if the 'only custom start G-code' is activated."
-        "\nUse 0 to deactivate.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("fan_speedup_overhangs", coBool);
-    def->label = L("Only overhangs");
-    def->tooltip = L("Will only take into account the delay for the cooling of overhangs.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("fan_kickstart", coFloat);
-    def->label = L("Fan kick-start time");
-    def->tooltip = L("Emit a max fan speed command for this amount of seconds before reducing to target speed to kick-start the cooling fan."
-                    "\nThis is useful for fans where a low PWM/power may be insufficient to get the fan started spinning from a stop, or to "
-                    "get the fan up to speed faster."
-                    "\nSet to 0 to deactivate.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-
-    def = this->add("time_cost", coFloat);
-    def->label = L("Time cost");
-    def->tooltip = L("The printer cost per hour.");
-    def->sidetext = L("money/h");
-    def->min     = 0;
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    // Orca: may remove this option later
-    def =this->add("support_chamber_temp_control",coBool);
-    def->label=L("Support control chamber temperature");
-    def->tooltip=L("This option is enabled if machine support controlling chamber temperature\nG-code command: M141 S(0-255)");
-    def->mode=comDevelop;
-    def->set_default_value(new ConfigOptionBool(true));
-    def->readonly=false;
-
-    def =this->add("support_air_filtration",coBool);
-    def->label=L("Support air filtration");
-    def->tooltip=L("Enable this if printer support air filtration\nG-code command: M106 P3 S(0-255)");
-    def->mode=comDevelop;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("gcode_flavor", coEnum);
-    def->label = L("G-code flavor");
-    def->tooltip = L("What kind of G-code the printer is compatible with.");
-    def->enum_keys_map = &ConfigOptionEnum<GCodeFlavor>::get_enum_values();
-    def->enum_values.push_back("marlin");
-    def->enum_values.push_back("klipper");
-    def->enum_values.push_back("reprapfirmware");
-    //def->enum_values.push_back("repetier");
-    //def->enum_values.push_back("teacup");
-    //def->enum_values.push_back("makerware");
-    def->enum_values.push_back("marlin2");
-    //def->enum_values.push_back("sailfish");
-    //def->enum_values.push_back("mach3");
-    //def->enum_values.push_back("machinekit");
-    //def->enum_values.push_back("smoothie");
-    //def->enum_values.push_back("no-extrusion");
-    def->enum_labels.push_back("Marlin(legacy)");
-    def->enum_labels.push_back(L("Klipper"));
-    def->enum_labels.push_back("RepRapFirmware");
-    //def->enum_labels.push_back("RepRap/Sprinter");
-    //def->enum_labels.push_back("Repetier");
-    //def->enum_labels.push_back("Teacup");
-    //def->enum_labels.push_back("MakerWare (MakerBot)");
-    def->enum_labels.push_back("Marlin 2");
-    //def->enum_labels.push_back("Sailfish (MakerBot)");
-    //def->enum_labels.push_back("Mach3/LinuxCNC");
-    //def->enum_labels.push_back("Machinekit");
-    //def->enum_labels.push_back("Smoothie");
-    //def->enum_labels.push_back(L("No extrusion"));
-    def->mode = comAdvanced;
-    def->readonly = false;
-    def->set_default_value(new ConfigOptionEnum<GCodeFlavor>(gcfMarlinLegacy));
-
-    def          = this->add("pellet_modded_printer", coBool);
-    def->label   = L("Pellet Modded Printer");
-    def->tooltip = L("Enable this option if your printer uses pellets instead of filaments.");
-    def->mode    = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_multi_bed_types", coBool);
-    def->label = L("Support multi bed types");
-    def->tooltip = L("Enable this option if you want to use multiple bed types.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("gcode_label_objects", coBool);
-    def->label = L("Label objects");
-    def->tooltip = L("Enable this to add comments into the G-code labeling print moves with what object they belong to,"
-                   " which is useful for the Octoprint CancelObject plugin. This settings is NOT compatible with "
-                   "Single Extruder Multi Material setup and Wipe into Object / Wipe into Infill.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(1));
-
-    def = this->add("exclude_object", coBool);
-    def->label = L("Exclude objects");
-    def->tooltip = L("Enable this option to add EXCLUDE OBJECT command in G-code.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("gcode_comments", coBool);
-    def->label = L("Verbose G-code");
-    def->tooltip = L("Enable this to get a commented G-code file, with each line explained by a descriptive text. "
-                   "If you print from SD card, the additional weight of the file could make your firmware "
-                   "slow down.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(0));
-    
-    //BBS
-    def = this->add("infill_combination", coBool);
-    def->label = L("Infill combination");
-    def->category = L("Strength");
-    def->tooltip = L("Automatically Combine sparse infill of several layers to print together to reduce time. Wall is still printed "
-                     "with original layer height.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def           = this->add("infill_shift_step", coFloat);
-    def->label    = L("Infill shift step");
-    def->category = L("Strength");
-    def->tooltip  = L("This parameter adds a slight displacement to each layer of infill to create a cross texture.");
-    def->sidetext = L("mm");
-    def->min      = 0;
-    def->max      = 10;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.4));
-
-    //Orca
-    def           = this->add("sparse_infill_rotate_template", coString);
-    def->label    = L("Sparse infill rotation template");
-    def->category = L("Strength");
-    def->tooltip  = L("Rotate the sparse infill direction per layer using a template of angles. "
-                      "Enter comma-separated degrees (e.g., '0,30,60,90'). "
-                      "Angles are applied in order by layer and repeat when the list ends. "
-                      "Advanced syntax is supported: '+5' rotates +5Â° every layer; '+5#5' rotates +5Â° every 5 layers. See the Wiki for details. "
-                      "When a template is set, the standard infill direction setting is ignored. "
-                      "Note: some infill patterns (e.g., Gyroid) control rotation themselves; use with care.");
-    def->sidetext = L("Â°");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
-
-    //Orca
-    def           = this->add("solid_infill_rotate_template", coString);
-    def->label    = L("Solid infill rotation template");
-    def->category = L("Strength");
-    def->tooltip  = L("This parameter adds a rotation of solid infill direction to each layer according to the specified template. "
-                      "The template is a comma-separated list of angles in degrees, e.g. '0,90'. "
-                      "The first angle is applied to the first layer, the second angle to the second layer, and so on. "
-                      "If there are more layers than angles, the angles will be repeated. Note that not all solid infill patterns support rotation.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
-
-    def           = this->add("skeleton_infill_density", coPercent);
-    def->label    = L("Skeleton infill density");
-    def->category = L("Strength");
-    def->tooltip  = L("The remaining part of the model contour after removing a certain depth from the surface is called the skeleton. "
-                      "This parameter is used to adjust the density of this section. "
-                      "When two regions have the same sparse infill settings but different skeleton densities, their skeleton areas will develop overlapping sections. "
-                      "Default is as same as infill density.");
-    def->sidetext = "%";
-    def->min      = 0;
-    def->max      = 100;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def           = this->add("skin_infill_density", coPercent);
-    def->label    = L("Skin infill density");
-    def->category = L("Strength");
-    def->tooltip  = L("The portion of the model's outer surface within a certain depth range is called the skin. "
-                      "This parameter is used to adjust the density of this section. "
-                      "When two regions have the same sparse infill settings but different skin densities, this area will not be split into two separate regions. "
-                      "Default is as same as infill density.");
-    def->sidetext = "%";
-    def->min  = 0;
-    def->max  = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def           = this->add("skin_infill_depth", coFloat);
-    def->label    = L("Skin infill depth");
-    def->category = L("Strength");
-    def->tooltip  = L("The parameter sets the depth of skin.");
-    def->sidetext = L("mm");
-    def->min      = 0;
-    def->max      = 100;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2.0));
-
-    def           = this->add("infill_lock_depth", coFloat);
-    def->label    = L("Infill lock depth");
-    def->category = L("Strength");
-    def->tooltip  = L("The parameter sets the overlapping depth between the interior and skin.");
-    def->sidetext = L("mm");
-    def->min      = 0;
-    def->max      = 100;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def           = this->add("skin_infill_line_width", coFloatOrPercent);
-    def->label    = L("Skin line width");
-    def->category = L("Strength");
-    def->tooltip  = L("Adjust the line width of the selected skin paths.");
-    def->sidetext = L("mm");
-    def->ratio_over = "nozzle_diameter";
-    def->min      = 0;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def           = this->add("skeleton_infill_line_width", coFloatOrPercent);
-    def->label    = L("Skeleton line width");
-    def->category = L("Strength");
-    def->tooltip  = L("Adjust the line width of the selected skeleton paths.");
-    def->sidetext = L("mm");
-    def->ratio_over = "nozzle_diameter";
-    def->min      = 0;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def           = this->add("symmetric_infill_y_axis", coBool);
-    def->label    = L("Symmetric infill Y axis");
-    def->category = L("Strength");
-    def->tooltip  = L("If the model has two parts that are symmetric about the Y axis,"
-                      " and you want these parts to have symmetric textures, please click this option on one of the parts.");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    // Orca: max layer height for combined infill
-    def = this->add("infill_combination_max_layer_height", coFloatOrPercent);
-    def->label = L("Infill combination - Max layer height");
-    def->category = L("Strength");
-    def->tooltip = L("Maximum layer height for the combined sparse infill.\n\n"
-                     "Set it to 0 or 100% to use the nozzle diameter (for maximum reduction in print time) or a value of ~80% to maximize sparse infill strength.\n\n"
-                     "The number of layers over which infill is combined is derived by dividing this value with the layer height and rounded down to the nearest decimal.\n\n"
-                     "Use either absolute mm values (eg. 0.32mm for a 0.4mm nozzle) or % values (eg 80%). This value must not be larger "
-                     "than the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(100., true));
-
-    def = this->add("sparse_infill_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Infill");
-    def->category = L("Extruders");
-    def->tooltip = L("Filament to print internal sparse infill.");
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("sparse_infill_line_width", coFloatOrPercent);
-    def->label = L("Sparse infill");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of internal sparse infill. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("infill_wall_overlap", coPercent);
-    def->label = L("Infill/Wall overlap");
-    def->category = L("Strength");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Infill area is enlarged slightly to overlap with wall for better bonding. "
-                     "The percentage value is relative to line width of sparse infill. "
-                     "Set this value to ~10-15% to minimize potential over extrusion and accumulation of "
-                     "material resulting in rough top surfaces.");
-    def->sidetext = "%";
-    def->ratio_over = "inner_wall_line_width";
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(15));
-    
-    def = this->add("top_bottom_infill_wall_overlap", coPercent);
-    def->label = L("Top/Bottom solid infill/wall overlap");
-    def->category = L("Strength");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Top solid infill area is enlarged slightly to overlap with wall for better bonding "
-                     "and to minimize the appearance of pinholes where the top infill meets the walls. "
-                     "A value of 25-30% is a good starting point, minimizing the appearance of pinholes. "
-                     "The percentage value is relative to line width of sparse infill.");
-    def->sidetext = "%";
-    def->ratio_over = "inner_wall_line_width";
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def = this->add("sparse_infill_speed", coFloat);
-    def->label = L("Sparse infill");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of internal sparse infill.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(100));
-
-    def = this->add("inherits", coString);
-    def->label = L("Inherits profile");
-    def->tooltip = L("Name of parent profile.");
-    def->full_width = true;
-    def->height = 5;
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    // The following value is to be stored into the project file (AMF, 3MF, Config ...)
-    // and it contains a sum of "inherits" values over the print and filament profiles.
-    def = this->add("inherits_group", coStrings);
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("interface_shells", coBool);
-    def->label = L("Interface shells");
-    def->tooltip = L("Force the generation of solid shells between adjacent materials/volumes. "
-                  "Useful for multi-extruder prints with translucent materials or manual soluble "
-                  "support material.");
-    def->category = L("Quality");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def           = this->add("mmu_segmented_region_max_width", coFloat);
-    def->label    = L("Maximum width of a segmented region");
-    def->tooltip  = L("Maximum width of a segmented region. Zero disables this feature.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 0;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def           = this->add("mmu_segmented_region_interlocking_depth", coFloat);
-    def->label    = L("Interlocking depth of a segmented region");
-    def->tooltip  = L("Interlocking depth of a segmented region. It will be ignored if "
-                    "\"mmu_segmented_region_max_width\" is zero or if \"mmu_segmented_region_interlocking_depth\" "
-                    "is bigger than \"mmu_segmented_region_max_width\". Zero disables this feature.");
-    def->sidetext = "mm";	// milimeters, don't need translation 
-    def->min      = 0;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def           = this->add("interlocking_beam", coBool);
-    def->label    = L("Use beam interlocking");
-    def->tooltip  = L("Generate interlocking beam structure at the locations where different filaments touch. This improves the adhesion between filaments, especially models printed in different materials.");
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def           = this->add("interlocking_beam_width", coFloat);
-    def->label    = L("Interlocking beam width");
-    def->tooltip  = L("The width of the interlocking structure beams.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 0.01;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.8));
-
-    def           = this->add("interlocking_orientation", coFloat);
-    def->label    = L("Interlocking direction");
-    def->tooltip  = L("Orientation of interlock beams.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min      = 0;
-    def->max      = 360;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(22.5));
-
-    def           = this->add("interlocking_beam_layer_count", coInt);
-    def->label    = L("Interlocking beam layers");
-    def->tooltip  = L("The height of the beams of the interlocking structure, measured in number of layers. Less layers is stronger, but more prone to defects.");
-    def->min      = 1;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(2));
-
-    def           = this->add("interlocking_depth", coInt);
-    def->label    = L("Interlocking depth");
-    def->tooltip  = L("The distance from the boundary between filaments to generate interlocking structure, measured in cells. Too few cells will result in poor adhesion.");
-    def->min      = 1;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(2));
-
-    def           = this->add("interlocking_boundary_avoidance", coInt);
-    def->label    = L("Interlocking boundary avoidance");
-    def->tooltip  = L("The distance from the outside of a model where interlocking structures will not be generated, measured in cells.");
-    def->min      = 0;
-    def->category = L("Advanced");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(2));
-
-    // ORCA: special flag for flow rate calibration
-    def           = this->add("calib_flowrate_topinfill_special_order", coBool);
-    def->mode     = comDevelop;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("ironing_type", coEnum);
-    def->label = L("Ironing Type");
-    def->category = L("Quality");
-    def->tooltip = L("Ironing is using small flow to print on same height of surface again to make flat surface more smooth. "
-                     "This setting controls which layer being ironed");
-    def->enum_keys_map = &ConfigOptionEnum<IroningType>::get_enum_values();
-    def->enum_values.push_back("no ironing");
-    def->enum_values.push_back("top");
-    def->enum_values.push_back("topmost");
-    def->enum_values.push_back("solid");
-    def->enum_labels.push_back(L("No ironing"));
-    def->enum_labels.push_back(L("Top surfaces"));
-    def->enum_labels.push_back(L("Topmost surface"));
-    def->enum_labels.push_back(L("All solid layer"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<IroningType>(IroningType::NoIroning));
-
-    def                = this->add("ironing_pattern", coEnum);
-    def->label         = L("Ironing Pattern");
-    def->tooltip       = L("The pattern that will be used when ironing.");
-    def->category      = L("Quality");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("concentric");
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Concentric"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    
-    def = this->add("ironing_flow", coPercent);
-    def->label = L("Ironing flow");
-    def->category = L("Quality");
-    def->tooltip = L("The amount of material to extrude during ironing. Relative to flow of normal layer height. "
-                     "Too high value results in overextrusion on the surface.");
-    def->sidetext = "%";
-    def->ratio_over = "layer_height";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(10));
-
-    def = this->add("ironing_spacing", coFloat);
-    def->label = L("Ironing line spacing");
-    def->category = L("Quality");
-    def->tooltip = L("The distance between the lines of ironing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.1));
-
-    def           = this->add("ironing_inset", coFloat);
-    def->label    = L("Ironing inset");
-    def->category = L("Quality");
-    def->tooltip  = L("The distance to keep from the edges. A value of 0 sets this to half of the nozzle diameter.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 0;
-    def->max      = 100;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("ironing_speed", coFloat);
-    def->label = L("Ironing speed");
-    def->category = L("Quality");
-    def->tooltip = L("Print speed of ironing lines.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(20));
-
-    def           = this->add("ironing_angle", coFloat);
-    def->label    = L("Ironing angle");
-    def->category = L("Quality");
-    def->tooltip  = L("The angle ironing is done at. A negative number disables this function and uses the default method.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min      = -1;
-    def->max      = 359;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(-1));
-
-    def = this->add("layer_change_gcode", coString);
-    def->label = L("Layer change G-code");
-    def->tooltip = L("This G-code is inserted at every layer change after the Z lift.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 5;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("time_lapse_gcode",coString);
-    def->label = L("Timelapse G-code");
-    def->multiline = true;
-    def->full_width = true;
-    def->height =5;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("silent_mode", coBool);
-    def->label = L("Supports silent mode");
-    def->tooltip = L("Whether the machine supports silent mode in which machine use lower acceleration to print.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("emit_machine_limits_to_gcode", coBool);
-    def->label = L("Emit limits to G-code");
-    def->category = L("Machine limits");
-    def->tooltip  = L("If enabled, the machine limits will be emitted to G-code file.\nThis option will be ignored if the G-code flavor is "
-                       "set to Klipper.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("machine_pause_gcode", coString);
-    def->label = L("Pause G-code");
-    def->tooltip = L("This G-code will be used as a code for the pause print. Users can insert pause G-code in the G-code viewer.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 12;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("template_custom_gcode", coString);
-    def->label = L("Custom G-code");
-    def->tooltip = L("This G-code will be used as a custom code.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 12;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("small_area_infill_flow_compensation", coBool);
-    def->label = L("Small area flow compensation (beta)");
-    def->tooltip = L("Enable flow compensation for small infill areas.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("small_area_infill_flow_compensation_model", coStrings);
-    def->label = L("Flow Compensation Model");
-    def->tooltip = L(
-        "Flow Compensation Model, used to adjust the flow for small infill "
-        "areas. The model is expressed as a comma separated pair of values for "
-        "extrusion length and flow correction factor. Each pair is on a "
-        "separate line, followed by a semicolon, in the following format: \"1.234, 5.678;\"");
-    def->mode = comAdvanced;
-    def->gui_flags = "serialized";
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 15;
-    def->set_default_value(new ConfigOptionStrings{"0,0", "\n0.2,0.4444", "\n0.4,0.6145", "\n0.6,0.7059", "\n0.8,0.7619", "\n1.5,0.8571", "\n2,0.8889", "\n3,0.9231", "\n5,0.9520", "\n10,1"});
-
-    def = this->add("has_scarf_joint_seam", coBool);
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    {
-        struct AxisDefault {
-            std::string         name;
-            std::vector<double> max_feedrate;
-            std::vector<double> max_acceleration;
-            std::vector<double> max_jerk;
-        };
-        std::vector<AxisDefault> axes {
-            // name, max_feedrate,  max_acceleration, max_jerk
-            { "x", { 500., 200. }, {  1000., 1000. }, { 10. , 10.  } },
-            { "y", { 500., 200. }, {  1000., 1000. }, { 10. , 10.  } },
-            { "z", {  12.,  12. }, {   500.,  200. }, {  0.2,  0.4 } },
-            { "e", { 120., 120. }, {  5000., 5000. }, {  2.5,  2.5 } }
-        };
-        for (const AxisDefault &axis : axes) {
-            std::string axis_upper = boost::to_upper_copy<std::string>(axis.name);
-            // Add the machine feedrate limits for XYZE axes. (M203)
-            def = this->add("machine_max_speed_" + axis.name, coFloats);
-            def->full_label = (boost::format("Maximum speed %1%") % axis_upper).str();
-            (void)L("Maximum speed X");
-            (void)L("Maximum speed Y");
-            (void)L("Maximum speed Z");
-            (void)L("Maximum speed E");
-            def->category = L("Machine limits");
-            def->readonly = false;
-            def->tooltip  = (boost::format("Maximum speed of %1% axis") % axis_upper).str();
-            (void)L("Maximum X speed");
-            (void)L("Maximum Y speed");
-            (void)L("Maximum Z speed");
-            (void)L("Maximum E speed");
-            def->sidetext = "mm/s";	// milimeters per second, don't need translation
-            def->min = 0;
-            def->mode = comSimple;
-            def->set_default_value(new ConfigOptionFloats(axis.max_feedrate));
-            // Add the machine acceleration limits for XYZE axes (M201)
-            def = this->add("machine_max_acceleration_" + axis.name, coFloats);
-            def->full_label = (boost::format("Maximum acceleration %1%") % axis_upper).str();
-            (void)L("Maximum acceleration X");
-            (void)L("Maximum acceleration Y");
-            (void)L("Maximum acceleration Z");
-            (void)L("Maximum acceleration E");
-            def->category = L("Machine limits");
-            def->readonly = false;
-            def->tooltip  = (boost::format("Maximum acceleration of the %1% axis") % axis_upper).str();
-            (void)L("Maximum acceleration of the X axis");
-            (void)L("Maximum acceleration of the Y axis");
-            (void)L("Maximum acceleration of the Z axis");
-            (void)L("Maximum acceleration of the E axis");
-            def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-            def->min = 0;
-            def->mode = comSimple;
-            def->set_default_value(new ConfigOptionFloats(axis.max_acceleration));
-            // Add the machine jerk limits for XYZE axes (M205)
-            def = this->add("machine_max_jerk_" + axis.name, coFloats);
-            def->full_label = (boost::format("Maximum jerk %1%") % axis_upper).str();
-            (void)L("Maximum jerk X");
-            (void)L("Maximum jerk Y");
-            (void)L("Maximum jerk Z");
-            (void)L("Maximum jerk E");
-            def->category = L("Machine limits");
-            def->readonly = false;
-            def->tooltip  = (boost::format("Maximum jerk of the %1% axis") % axis_upper).str();
-            (void)L("Maximum jerk of the X axis");
-            (void)L("Maximum jerk of the Y axis");
-            (void)L("Maximum jerk of the Z axis");
-            (void)L("Maximum jerk of the E axis");
-            def->sidetext = "mm/s";	// milimeters per second, don't need translation
-            def->min = 0;
-            def->mode = comSimple;
-            def->set_default_value(new ConfigOptionFloats(axis.max_jerk));
-        }
-    }
-    // M205 J... [mm] machine junction deviation limits 
-    def = this->add("machine_max_junction_deviation", coFloats);
-    def->full_label = L("Maximum Junction Deviation");
-    def->category = L("Machine limits");
-    def->tooltip = L("Maximum junction deviation (M205 J, only apply if JD > 0 for Marlin Firmware)");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats{0. ,0. });
-
-    // M205 S... [mm/sec]
-    def = this->add("machine_min_extruding_rate", coFloats);
-    def->full_label = L("Minimum speed for extruding");
-    def->category = L("Machine limits");
-    def->tooltip = L("Minimum speed for extruding (M205 S)");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloats{ 0., 0. });
-
-    // M205 T... [mm/sec]
-    def = this->add("machine_min_travel_rate", coFloats);
-    def->full_label = L("Minimum travel speed");
-    def->category = L("Machine limits");
-    def->tooltip = L("Minimum travel speed (M205 T)");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloats{ 0., 0. });
-
-    // M204 P... [mm/sec^2]
-    def = this->add("machine_max_acceleration_extruding", coFloats);
-    def->full_label = L("Maximum acceleration for extruding");
-    def->category = L("Machine limits");
-    def->tooltip = L("Maximum acceleration for extruding (M204 P)");
-    //                 "Marlin (legacy) firmware flavor will use this also "
-    //                 "as travel acceleration (M204 T).");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->readonly = false;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats{ 1500., 1250. });
-
-
-    // M204 R... [mm/sec^2]
-    def = this->add("machine_max_acceleration_retracting", coFloats);
-    def->full_label = L("Maximum acceleration for retracting");
-    def->category = L("Machine limits");
-    def->tooltip = L("Maximum acceleration for retracting (M204 R)");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->readonly = false;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats{ 1500., 1250. });
-
-    // M204 T... [mm/sec^2]
-    def = this->add("machine_max_acceleration_travel", coFloats);
-    def->full_label = L("Maximum acceleration for travel");
-    def->category = L("Machine limits");
-    def->tooltip = L("Maximum acceleration for travel (M204 T), it only applies to Marlin 2.");
-    def->sidetext = u8"mm/sÂ²";	// milimeters per second per second, don't need translation
-    def->min = 0;
-    def->readonly = false;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats{ 0., 0. });
-
-    // resonance avoidance ported over from qidi slicer
-    def          = this->add("resonance_avoidance", coBool);
-    def->label   = L("Resonance avoidance");
-    def->tooltip = L("By reducing the speed of the outer wall to avoid the resonance zone of the printer, ringing on the surface of the "
-                     "model are avoided.\n"
-                     "Please turn this option off when testing ringing.");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def           = this->add("min_resonance_avoidance_speed", coFloat);
-    def->label    = L("Min");
-    def->tooltip  = L("Minimum speed of resonance avoidance.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min      = 0;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(70));
-
-    def           = this->add("max_resonance_avoidance_speed", coFloat);
-    def->label    = L("Max");
-    def->tooltip  = L("Maximum speed of resonance avoidance.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min      = 0;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(120));
-
-    def = this->add("fan_max_speed", coFloats);
-    def->label = L("Fan speed");
-    def->tooltip = L("Part cooling fan speed may be increased when auto cooling is enabled. "
-                     "This is the maximum speed for the part cooling fan.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats { 100 });
-
-    def = this->add("max_layer_height", coFloats);
-    def->label = L("Max");
-    def->tooltip = L("The highest printable layer height for the extruder. "
-                     "Used to limit the maximum layer height when enable adaptive layer height.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("max_volumetric_extrusion_rate_slope", coFloat);
-    def->label = L("Extrusion rate smoothing");
-    def->tooltip = L("This parameter smooths out sudden extrusion rate changes that happen when " 
-                     "the printer transitions from printing a high flow (high speed/larger width) "
-                     "extrusion to a lower flow (lower speed/smaller width) extrusion and vice versa.\n\n"
-                     "It defines the maximum rate by which the extruded volumetric flow in mmÂ³/s can change over time. "
-                     "Higher values mean higher extrusion rate changes are allowed, resulting in faster speed transitions.\n\n" 
-                     "A value of 0 disables the feature.\n\n"
-                     "For a high speed, high flow direct drive printer (like the Bambu lab or Voron) this value is usually not needed. "
-                     "However it can provide some marginal benefit in certain cases where feature speeds vary greatly. For example, "
-                     "when there are aggressive slowdowns due to overhangs. In these cases a high value of around 300-350 mmÂ³/sÂ² is "
-                     "recommended as this allows for just enough smoothing to assist pressure advance achieve a smoother flow transition.\n\n"
-                     "For slower printers without pressure advance, the value should be set much lower. "
-                     "A value of 10-15 mmÂ³/sÂ² is a good starting point for direct drive extruders and 5-10 mmÂ³/sÂ² for Bowden style.\n\n"
-                     "This feature is known as Pressure Equalizer in Prusa slicer.\n\n"
-                     "Note: this parameter disables arc fitting.");
-    def->sidetext = u8"mmÂ³/sÂ²";	// cubic milimeters per second per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("max_volumetric_extrusion_rate_slope_segment_length", coFloat);
-    def->label = L("Smoothing segment length");
-    def->tooltip = L("A lower value results in smoother extrusion rate transitions. "
-                     "However, this results in a significantly larger G-code file and more instructions for the printer to process.\n\n"
-                     "Default value of 3 works well for most cases. If your printer is stuttering, increase this value to reduce the number of adjustments made.\n\n"
-                     "Allowed values: 0.5-5");
-    def->min = 0.5;
-    def->max = 5;
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(3.0));
-    
-    def = this->add("extrusion_rate_smoothing_external_perimeter_only", coBool);
-    def->label = L("Apply only on external features");
-    def->tooltip = L("Applies extrusion rate smoothing only on external perimeters and overhangs. This can help reduce artefacts due to sharp speed transitions on externally visible "
-                     "overhangs without impacting the print speed of features that will not be visible to the user.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-
-    def = this->add("fan_min_speed", coFloats);
-    def->label = L("Fan speed");
-    def->tooltip = L("Minimum speed for part cooling fan.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats { 20 });
-
-    def = this->add("additional_cooling_fan_speed", coInts);
-    def->label = L("Fan speed");
-    def->tooltip = L("Speed of auxiliary part cooling fan. Auxiliary fan will run at this speed during printing except the first several layers "
-                     "which is defined by no cooling layers.\nPlease enable auxiliary_fan in printer settings to use this feature. G-code command: M106 P2 S(0-255)");
-    def->sidetext = "%";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInts { 0 });
-
-    def = this->add("min_layer_height", coFloats);
-    def->label = L("Min");
-    def->tooltip = L("The lowest printable layer height for the extruder. "
-                     "Used to limit the minimum layer height when enable adaptive layer height.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0.07 });
-
-    def = this->add("slow_down_min_speed", coFloats);
-    def->label = L("Min print speed");
-    def->tooltip = L("The minimum print speed to which the printer slows down to maintain the minimum layer time defined above "
-                     "when the slowdown for better layer cooling is enabled.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 10. });
-
-    def = this->add("nozzle_diameter", coFloats);
-    def->label = L("Nozzle diameter");
-    def->tooltip = L("The diameter of nozzle.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->max = 100;
-    def->set_default_value(new ConfigOptionFloats { 0.4 });
-
-    def = this->add("notes", coString);
-    def->label = L("Configuration notes");
-    def->tooltip = L("You can put here your personal notes. This text will be added to the G-code "
-                   "header comments.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 13;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("host_type", coEnum);
-    def->label = L("Host Type");
-    def->tooltip = L("Snapmaker Orca can upload G-code files to a printer host. This field must contain "
-                   "the kind of the host.");
-    def->enum_keys_map = &ConfigOptionEnum<PrintHostType>::get_enum_values();
-    def->enum_values.push_back("prusalink");
-    def->enum_values.push_back("prusaconnect");
-    def->enum_values.push_back("octoprint");
-    def->enum_values.push_back("duet");
-    def->enum_values.push_back("flashair");
-    def->enum_values.push_back("astrobox");
-    def->enum_values.push_back("repetier");
-    def->enum_values.push_back("mks");
-    def->enum_values.push_back("esp3d");
-    def->enum_values.push_back("crealityprint");
-    def->enum_values.push_back("obico");
-    def->enum_values.push_back("flashforge");
-    def->enum_values.push_back("simplyprint");
-    def->enum_values.push_back("elegoolink");
-    def->enum_labels.push_back("PrusaLink");
-    def->enum_labels.push_back("PrusaConnect");
-    def->enum_labels.push_back("Octo/Klipper");
-    def->enum_labels.push_back("Duet");
-    def->enum_labels.push_back("FlashAir");
-    def->enum_labels.push_back("AstroBox");
-    def->enum_labels.push_back("Repetier");
-    def->enum_labels.push_back("MKS");
-    def->enum_labels.push_back("ESP3D");
-    def->enum_labels.push_back("CrealityPrint");
-    def->enum_labels.push_back("Obico");
-    def->enum_labels.push_back("Flashforge");
-    def->enum_labels.push_back("SimplyPrint");
-    def->enum_labels.push_back("Elegoo Link");
-    def->mode = comAdvanced;
-    def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionEnum<PrintHostType>(htOctoPrint));
-    
-
-    def = this->add("nozzle_volume", coFloat);
-    def->label = L("Nozzle volume");
-    def->tooltip = L("Volume of nozzle between the cutter and the end of nozzle.");
-    def->sidetext = u8"mmÂ³";	// cubic milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->readonly = false;
-    def->set_default_value(new ConfigOptionFloat { 0.0 });
-
-    def = this->add("cooling_tube_retraction", coFloat);
-    def->label = L("Cooling tube position");
-    def->tooltip = L("Distance of the center-point of the cooling tube from the extruder tip.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(91.5));
-
-    def = this->add("cooling_tube_length", coFloat);
-    def->label = L("Cooling tube length");
-    def->tooltip = L("Length of the cooling tube to limit space for cooling moves inside it.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.));
-
-    def = this->add("high_current_on_filament_swap", coBool);
-    def->label = L("High extruder current on filament swap");
-    def->tooltip = L("It may be beneficial to increase the extruder motor current during the filament exchange"
-                   " sequence to allow for rapid ramming feed rates and to overcome resistance when loading"
-                   " a filament with an ugly shaped tip.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(0));
-
-    def = this->add("parking_pos_retraction", coFloat);
-    def->label = L("Filament parking position");
-    def->tooltip = L("Distance of the extruder tip from the position where the filament is parked "
-                      "when unloaded. This should match the value in printer firmware.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(92.));
-
-    def = this->add("extra_loading_move", coFloat);
-    def->label = L("Extra loading distance");
-    def->tooltip = L("When set to zero, the distance the filament is moved from parking position during load "
-                      "is exactly the same as it was moved back during unload. When positive, it is loaded further, "
-                      "if negative, the loading move is shorter than unloading.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(-2.));
-
-    def = this->add("start_end_points", coPoints);
-    def->label = L("Start end points");
-    def->tooltip  = L("The start and end points which is from cutter area to garbage can.");
-    def->mode     = comDevelop;
-    def->readonly = true;
-    // start and end point is from the change_filament_gcode
-    def->set_default_value(new ConfigOptionPoints{Vec2d(30, -3), Vec2d(54, 245)});
-
-    def = this->add("reduce_infill_retraction", coBool);
-    def->label = L("Reduce infill retraction");
-    def->tooltip = L("Don't retract when the travel is in infill area absolutely. That means the oozing can't been seen. "
-                     "This can reduce times of retraction for complex model and save printing time, but make slicing and "
-                     "G-code generating slower.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("ooze_prevention", coBool);
-    def->label = L("Enable");
-    def->tooltip = L("This option will drop the temperature of the inactive extruders to prevent oozing.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("filename_format", coString);
-    def->label = L("Filename format");
-    def->tooltip = L("Users can define the project file name when exporting.");
-    def->full_width = true;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString("{input_filename_base}_{filament_type[initial_tool]}_{print_time}.gcode"));
-
-    def = this->add("make_overhang_printable", coBool);
-    def->label = L("Make overhangs printable");
-    def->category = L("Quality");
-    def->tooltip = L("Modify the geometry to print overhangs without support material.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("make_overhang_printable_angle", coFloat);
-    def->label = L("Make overhangs printable - Maximum angle");
-    def->category = L("Quality");
-    def->tooltip = L("Maximum angle of overhangs to allow after making more steep overhangs printable."
-                     "90Â° will not change the model at all and allow any overhang, while 0 will "
-                     "replace all overhangs with conical material.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.;
-    def->max = 90.;
-    def->set_default_value(new ConfigOptionFloat(55.));
-
-    def = this->add("make_overhang_printable_hole_size", coFloat);
-    def->label = L("Make overhangs printable - Hole area");
-    def->category = L("Quality");
-    def->tooltip = L("Maximum area of a hole in the base of the model before it's filled by conical material. "
-                     "A value of 0 will fill all the holes in the model base.");
-    def->sidetext = "mmÂ²";	// square milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("detect_overhang_wall", coBool);
-    def->label = L("Detect overhang wall");
-    def->category = L("Quality");
-    def->tooltip = L("Detect the overhang percentage relative to line width and use different speed to print. "
-                     "For 100%% overhang, bridge speed is used.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("wall_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Walls");
-    def->category = L("Extruders");
-    def->tooltip = L("Filament to print walls.");
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("inner_wall_line_width", coFloatOrPercent);
-    def->label = L("Inner wall");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of inner wall. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("inner_wall_speed", coFloat);
-    def->label = L("Inner wall");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of inner wall.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->aliases = { "perimeter_feed_rate" };
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(60));
-
-    def = this->add("wall_loops", coInt);
-    def->label = L("Wall loops");
-    def->category = L("Strength");
-    def->tooltip = L("Number of walls of every layer.");
-    def->min = 0;
-    def->max = 1000;
-    def->set_default_value(new ConfigOptionInt(2));
-    
-    def = this->add("alternate_extra_wall", coBool);
-    def->label = L("Alternate extra wall");
-    def->category = L("Strength");
-    def->tooltip = L("This setting adds an extra wall to every other layer. This way the infill gets wedged vertically between the walls, resulting in stronger prints.\n\n"
-                     "When this option is enabled, the ensure vertical shell thickness option needs to be disabled.\n\n"
-                     "Using lightning infill together with this option is not recommended as there is limited infill to anchor the extra perimeters to.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    
-    def = this->add("post_process", coStrings);
-    def->label = L("Post-processing Scripts");
-    def->tooltip = L("If you want to process the output G-code through custom scripts, "
-                   "just list their absolute paths here. Separate multiple scripts with a semicolon. "
-                   "Scripts will be passed the absolute path to the G-code file as the first argument, "
-                   "and they can access the Snapmaker Orca config settings by reading environment variables.");
-    def->gui_flags = "serialized";
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 6;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("mixed_color_layer_height_a", coFloat);
-    def->label = L("Dithering cadence height A");
-    def->category = L("Others");
-    def->tooltip = L("Layer height contribution of component A for dithering virtual filaments. "
-                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->sidetext = "mm";
-    def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_color_layer_height_b", coFloat);
-    def->label = L("Dithering cadence height B");
-    def->category = L("Others");
-    def->tooltip = L("Layer height contribution of component B for dithering virtual filaments. "
-                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->sidetext = "mm";
-    def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_filament_gradient_mode", coBool);
-    def->label = L("Height-weighted cadence");
-    def->category = L("Others");
-    def->tooltip = L("Enable height-weighted cadence for mixed filaments. "
-                     "Limitation: only one height-weighted mixed color should be present at a given Z plane, "
-                     "because independent per-color layer heights are not supported and the resulting layer height applies to the whole plane. "
-                     "When disabled, layer-cycle cadence is used.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("mixed_filament_height_lower_bound", coFloat);
-    def->label = L("Local-Z lower height bound");
-    def->category = L("Others");
-    def->tooltip = L("Lower bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
-                     "Smaller values let Local-Z use thinner sublayers for a color when needed.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->sidetext = "mm";
-    def->min = 0.01;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.04));
-
-    def = this->add("mixed_filament_height_upper_bound", coFloat);
-    def->label = L("Local-Z upper height bound");
-    def->category = L("Others");
-    def->tooltip = L("Upper bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
-                     "Larger values let Local-Z use thicker sublayers for a color when needed.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->sidetext = "mm";
-    def->min = 0.01;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.16));
-
-    def = this->add("mixed_filament_advanced_dithering", coBool);
-    def->label = L("Advanced dithering");
-    def->category = L("Others");
-    def->tooltip = L("Distribute mixed filament layer-cycle cadence using an advanced ordered dithering pattern "
-                     "instead of a simple contiguous A-then-B run. This can reduce visible striping for some hues.\n\n"
-                     "This is an even more experimental mode and the perceived color may differ from normal dithering "
-                     "for the same filament pair and ratio.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("mixed_filament_pointillism_pixel_size", coFloat);
-    def->label = L("Pointillisme pixel size");
-    def->category = L("Others");
-    def->tooltip = L("Length of one pointillisme segment along an extrusion path for same-layer pointillisme mode. "
-                     "Set to 0 to use automatic nozzle-based sizing.\n\n"
-                     "Warning: Same-layer pointillisme is extremely experimental and may produce unusable results.");
-    def->sidetext = "mm";
-    def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_filament_pointillism_line_gap", coFloat);
-    def->label = L("Pointillisme line gap");
-    def->category = L("Others");
-    def->tooltip = L("Optional non-extruded spacing between adjacent pointillisme segments. "
-                     "Increase carefully to improve separation and print quality.\n\n"
-                     "Warning: Same-layer pointillisme is extremely experimental and may produce unusable results.");
-    def->sidetext = "mm";
-    def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_filament_component_bias_enabled", coBool);
-    def->label = L("Enable mixed filament bias");
-    def->category = L("Others");
-    def->tooltip = L("Show and apply the per-row mixed filament Bias control.\n\n"
-                     "When enabled, the selected filament in a mixed pair is recessed slightly so the other component becomes more visible.\n\n"
-                     "Bias is ignored for grouped wall patterns, same-layer pointillisme, and Local Z dithering.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("mixed_filament_surface_indentation", coFloat);
-    def->label = L("Selective Expansion contraction");
-    def->category = L("Others");
-    def->tooltip = L("XY offset applied to mixed-filament painted regions before region assignment.\n\n"
-                     "Positive values contract the mixed zone inward. Negative values expand it outward.\n\n"
-                     "This applies to mixed filament usage in layer cadence, height cadence, same-layer pointillisme, and local Z dithering.");
-    def->sidetext = "mm";
-    def->min = -2.0;
-    def->max = 2.0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("mixed_filament_region_collapse", coBool);
-    def->label = L("Collapse same-color mixed regions");
-    def->category = L("Others");
-    def->tooltip = L("Merge ordinary mixed-filament painted regions into a single area when they resolve to the same physical filament on a layer.\n\n"
-                     "This improves continuity for adjacent same-color areas.\n\n"
-                     "Subdivide Mix Layer disables this behavior, and gradient mixed regions also bypass it because they use the Local-Z pipeline.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("mixed_filament_definitions", coString);
-    def->label = L("Mixed filament custom definitions");
-    def->tooltip = L("Serialized custom mixed filament rows.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->gui_flags = "serialized";
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
-
-    def = this->add("dithering_z_step_size", coFloat);
-    def->label = L("Dithering Z step size");
-    def->category = L("Others");
-    def->tooltip = L("Layer height used in Z zones painted with dithering (mixed virtual filaments). "
-                     "Set to 0 to keep normal layer height in those zones.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->sidetext = "mm";
-    def->min = 0.;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("dithering_local_z_mode", coBool);
-    def->label = L("Subdivide Mix Layer");
-    def->category = L("Material");
-    def->tooltip  = L("Enable \"Subdivide Mix Layer\" for mixing areas. Layer height will be subdivided for better color mixing results.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("dithering_local_z_whole_objects", coBool);
-    def->label = L("Full domain");
-    def->category = L("Others");
-    def->tooltip = L("Experimental. Apply Local-Z thinning across whole mixed-color regions instead of limiting the effect strictly to painted mixed masks.\n\n"
-                     "Only available when Subdivide Mix Layer is enabled.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("dithering_local_z_infill", coBool);
-    def->label = L("Apply subdivision to infill");
-    def->category = L("Material");
-    def->tooltip = L("Experimental. When Subdivide Mix Layer is enabled, also apply the same subdivision to infill inside mixed-color areas.\n\n"
-                     "This is enabled automatically with Subdivide Mix Layer. Turn it off to keep infill on the normal layer height.\n\n"
-                     "It can improve internal color mixing, but may add toolchanges and affect infill behavior.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("dithering_local_z_direct_multicolor", coBool);
-    def->label = L("Use direct multicolor Local-Z solver");
-    def->category = L("Others");
-    def->tooltip = L("Experimental. For mixed rows with 3 or more physical filaments, allocate Local-Z sublayers directly across all components with carry-over error between layers instead of collapsing them into pair cadence.\n\n"
-                     "This can reduce visible banding in multicolor Local-Z blends at the cost of more toolchanges. It is ignored when explicit Local-Z A/B heights are set.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("dithering_step_painted_zones_only", coBool);
-    def->label = L("Use step size in painted zones only");
-    def->category = L("Others");
-    def->tooltip = L("When enabled, dithering Z step size is applied only where mixed filament is painted. "
-                     "Unpainted zones keep their original layer height.\n\n"
-                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-    
-    def = this->add("printer_model", coString);
-    def->label = L("Printer type");
-    def->tooltip = L("Type of the printer.");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("printer_notes", coString);
-    def->label = L("Printer notes");
-    def->tooltip = L("You can put your notes regarding the printer here.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 13;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-    
-    def = this->add("printer_variant", coString);
-    def->label = L("Printer variant");
-    //def->tooltip = L("Name of the printer variant. For example, the printer variants may be differentiated by a nozzle diameter.");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("print_settings_id", coString);
-    def->set_default_value(new ConfigOptionString());
-    //BBS: open this option to command line
-    //def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("printer_settings_id", coString);
-    def->set_default_value(new ConfigOptionString());
-    //BBS: open this option to command line
-    //def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("raft_contact_distance", coFloat);
-    def->label = L("Raft contact Z distance");
-    def->category = L("Support");
-    def->tooltip = L("Z gap between object and raft. Ignored for soluble interface.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.1));
-
-    def = this->add("raft_expansion", coFloat);
-    def->label = L("Raft expansion");
-    def->category = L("Support");
-    def->tooltip = L("Expand all raft layers in XY plane.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.5));
-
-    def = this->add("raft_first_layer_density", coPercent);
-    def->label = L("Initial layer density");
-    def->category = L("Support");
-    def->tooltip = L("Density of the first raft or support layer.");
-    def->sidetext = "%";
-    def->min = 10;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(90));
-
-    def = this->add("raft_first_layer_expansion", coFloat);
-    def->label = L("Initial layer expansion");
-    def->category = L("Support");
-    def->tooltip = L("Expand the first raft or support layer to improve bed plate adhesion.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    //BBS: change from 3.0 to 2.0
-    def->set_default_value(new ConfigOptionFloat(2.0));
-
-    def = this->add("raft_layers", coInt);
-    def->label = L("Raft layers");
-    def->category = L("Support");
-    def->tooltip = L("Object will be raised by this number of support layers. "
-                     "Use this function to avoid warping when printing ABS.");
-    def->sidetext = L("layers");
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("resolution", coFloat);
-    def->label = L("Resolution");
-    def->tooltip = L("The G-code path is generated after simplifying the contour of models to avoid too many points and G-code lines. "
-                     "Smaller value means higher resolution and more time to slice.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.01));
-
-    def = this->add("retraction_minimum_travel", coFloats);
-    def->label = L("Travel distance threshold");
-    def->tooltip = L("Only trigger retraction when the travel distance is longer than this threshold.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 2. });
-
-    def = this->add("retract_before_wipe", coPercents);
-    def->label = L("Retract amount before wipe");
-    def->tooltip = L("The length of fast retraction before wipe, relative to retraction length.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercents { 100 });
-
-    def = this->add("retract_when_changing_layer", coBools);
-    def->label = L("Retract when change layer");
-    def->tooltip = L("Force a retraction when changes layer.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("retraction_length", coFloats);
-    def->label = L("Length");
-    def->full_label = L("Retraction Length");
-    def->tooltip = L("Some amount of material in extruder is pulled back to avoid ooze during long travel. "
-                     "Set zero to disable retraction.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats { 0.8 });
-
-    def = this->add("enable_long_retraction_when_cut",coInt);
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionInt {0});
-
-    def = this->add("long_retractions_when_cut", coBools);
-    def->label = L("Long retraction when cut (beta)");
-    def->tooltip = L("Experimental feature: Retracting and cutting off the filament at a longer distance during changes to minimize purge. "
-                     "While this reduces flush significantly, it may also raise the risk of nozzle clogs or other printing problems.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBools {false});
-
-    def = this->add("retraction_distances_when_cut",coFloats);
-    def->label = L("Retraction distance when cut");
-    def->tooltip = L("Experimental feature: Retraction length before cutting off during filament change.");
-    def->mode = comDevelop;
-    def->min = 10;
-    def->max = 18;
-    def->set_default_value(new ConfigOptionFloats {18});
-
-    def = this->add("retract_length_toolchange", coFloats);
-    def->label = L("Retraction Length (Toolchange)");
-    //def->full_label = L("Retraction Length (Toolchange)");
-    def->full_label = "Retraction Length (Toolchange)";
-    //def->tooltip = L("When retraction is triggered before changing tool, filament is pulled back "
-    //               "by the specified amount (the length is measured on raw filament, before it enters "
-    //               "the extruder).");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 10. });
-
-    def = this->add("z_hop", coFloats);
-    def->label = L("Z-hop height");
-    def->tooltip = L("Whenever the retraction is done, the nozzle is lifted a little to create clearance between nozzle and the print. "
-                     "It prevents nozzle from hitting the print when travel move. "
-                     "Using spiral lines to lift Z can prevent stringing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comSimple;
-    def->min = 0;
-    def->max = 5;
-    def->set_default_value(new ConfigOptionFloats { 0.4 });
-
-    def             = this->add("retract_lift_above", coFloats);
-    def->label      = L("Z-hop lower boundary");
-    def->tooltip    = L("Z-hop will only come into effect when Z is above this value and is below the parameter: \"Z-hop upper boundary\".");
-    def->sidetext   = "mm";	// milimeters, don't need translation
-    def->mode       = comAdvanced;
-    def->min        = 0;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
-    def             = this->add("retract_lift_below", coFloats);
-    def->label      = L("Z-hop upper boundary");
-    def->tooltip    = L("If this value is positive, Z-hop will only come into effect when Z is above the parameter: \"Z-hop lower boundary\" and is below this value.");
-    def->sidetext   = "mm";	// milimeters, don't need translation
-    def->mode       = comAdvanced;
-    def->min        = 0;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
-    def = this->add("z_hop_types", coEnums);
-    def->label = L("Z-hop type");
-    def->tooltip = L("Type of Z-hop.");
-    def->enum_keys_map = &ConfigOptionEnum<ZHopType>::get_enum_values();
-    def->enum_values.push_back("Auto Lift");
-    def->enum_values.push_back("Normal Lift");
-    def->enum_values.push_back("Slope Lift");
-    def->enum_values.push_back("Spiral Lift");
-    def->enum_labels.push_back(L("Auto"));
-    def->enum_labels.push_back(L("Normal"));
-    def->enum_labels.push_back(L("Slope"));
-    def->enum_labels.push_back(L("Spiral"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnumsGeneric{ ZHopType::zhtSlope });
-
-    def = this->add("z_hop_when_prime", coBools);
-    def->label = L("Z hop when moving to tower");
-    def->mode  = comAdvanced;
-    def->set_default_value(new ConfigOptionBools{true});
-
-    def = this->add("travel_slope", coFloats);
-    def->label = L("Traveling angle");
-    def->tooltip = L("Traveling angle for Slope and Spiral Z-hop type. Setting it to 90Â° results in Normal Lift.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->min = 1;
-    def->max = 90;
-    def->set_default_value(new ConfigOptionFloats { 3 });
-
-    def = this->add("retract_lift_above", coFloats);
-    def->label = L("Only lift Z above");
-    def->tooltip = L("If you set this to a positive value, Z lift will only take place above the specified absolute Z.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
-    def = this->add("retract_lift_below", coFloats);
-    def->label = L("Only lift Z below");
-    def->tooltip = L("If you set this to a positive value, Z lift will only take place below the specified absolute Z.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats{0.});
-
-    def = this->add("retract_lift_enforce", coEnums);
-    def->label = L("On surfaces");
-    def->tooltip = L("Enforce Z-Hop behavior. This setting is impacted by the above settings (Only lift Z above/below).");
-    def->enum_keys_map = &ConfigOptionEnum<RetractLiftEnforceType>::get_enum_values();
-    def->enum_values.push_back("All Surfaces");
-    def->enum_values.push_back("Top Only");
-    def->enum_values.push_back("Bottom Only");
-    def->enum_values.push_back("Top and Bottom");
-    def->enum_labels.push_back(L("All Surfaces"));
-    def->enum_labels.push_back(L("Top Only"));
-    def->enum_labels.push_back(L("Bottom Only"));
-    def->enum_labels.push_back(L("Top and Bottom"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnumsGeneric{RetractLiftEnforceType ::rletAllSurfaces});
-
-    def = this->add("retract_restart_extra", coFloats);
-    def->label = L("Extra length on restart");
-    def->tooltip = L("When the retraction is compensated after the travel move, the extruder will push "
-                  "this additional amount of filament. This setting is rarely needed.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("retract_restart_extra_toolchange", coFloats);
-    def->label = L("Extra length on restart");
-    def->tooltip = L("When the retraction is compensated after changing tool, the extruder will push "
-                  "this additional amount of filament.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("retraction_speed", coFloats);
-    def->label = L("Retraction Speed");
-    def->full_label = L("Retraction Speed");
-    def->tooltip = L("Speed for retracting filament from the nozzle.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 30. });
-
-    def = this->add("deretraction_speed", coFloats);
-    def->label = L("De-retraction Speed");
-    def->full_label = L("De-retraction Speed");
-    def->tooltip = L("Speed for reloading filament into the nozzle. Zero means same speed of retraction.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
-
-    def = this->add("use_firmware_retraction", coBool);
-    def->label = L("Use firmware retraction");
-    def->tooltip = L("This experimental setting uses G10 and G11 commands to have the firmware "
-                   "handle the retraction. This is only supported in recent Marlin.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("bbl_calib_mark_logo", coBool);
-    def->label = L("Show auto-calibration marks");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("disable_m73", coBool);
-    def->label = L("Disable set remaining print time");
-    def->tooltip = L("Disable generating of the M73: Set remaining print time in the final G-code.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("seam_position", coEnum);
-    def->label = L("Seam position");
-    def->category = L("Quality");
-    def->tooltip = L("The start position to print each part of outer wall.");
-    def->enum_keys_map = &ConfigOptionEnum<SeamPosition>::get_enum_values();
-    def->enum_values.push_back("nearest");
-    def->enum_values.push_back("aligned");
-    def->enum_values.push_back("aligned_back");
-    def->enum_values.push_back("back");
-    def->enum_values.push_back("random");
-    def->enum_labels.push_back(L("Nearest"));
-    def->enum_labels.push_back(L("Aligned"));
-    def->enum_labels.push_back(L("Aligned back"));
-    def->enum_labels.push_back(L("Back"));
-    def->enum_labels.push_back(L("Random"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<SeamPosition>(spAligned));
-
-    def = this->add("staggered_inner_seams", coBool);
-    def->label = L("Staggered inner seams");
-    def->tooltip = L("This option causes the inner seams to be shifted backwards based on their depth, forming a zigzag pattern.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    
-    def = this->add("seam_gap", coFloatOrPercent);
-    def->label = L("Seam gap");
-    def->tooltip = L("In order to reduce the visibility of the seam in a closed loop extrusion, the loop is interrupted and shortened by a specified amount.\n"
-                     "This amount can be specified in millimeters or as a percentage of the current extruder diameter. The default value for this parameter is 10%.");
-    def->sidetext = L("mm or %");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(10,true));
-
-    def = this->add("seam_slope_type", coEnum);
-    def->label = L("Scarf joint seam (beta)");
-    def->tooltip = L("Use scarf joint to minimize seam visibility and increase seam strength.");
-    def->enum_keys_map = &ConfigOptionEnum<SeamScarfType>::get_enum_values();
-    def->enum_values.push_back("none");
-    def->enum_values.push_back("external");
-    def->enum_values.push_back("all");
-    def->enum_labels.push_back(L("None"));
-    def->enum_labels.push_back(L("Contour"));
-    def->enum_labels.push_back(L("Contour and hole"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
-
-    def = this->add("seam_slope_conditional", coBool);
-    def->label = L("Conditional scarf joint");
-    def->tooltip = L("Apply scarf joints only to smooth perimeters where traditional seams do not conceal the seams at sharp corners effectively.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("scarf_angle_threshold", coInt);
-    def->label = L("Conditional angle threshold");
-    def->tooltip = L(
-        "This option sets the threshold angle for applying a conditional scarf joint seam.\nIf the maximum angle within the perimeter loop "
-        "exceeds this value (indicating the absence of sharp corners), a scarf joint seam will be used. The default value is 155Â°.");
-    def->mode = comAdvanced;
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 180;
-    def->set_default_value(new ConfigOptionInt(155));
-
-    def = this->add("scarf_overhang_threshold", coPercent);
-    def->label = L("Conditional overhang threshold");
-    def->category = L("Quality");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip  = L("This option determines the overhang threshold for the application of scarf joint seams. If the unsupported portion "
-                       "of the perimeter is less than this threshold, scarf joint seams will be applied. The default threshold is set at 40% "
-                       "of the external wall's width. Due to performance considerations, the degree of overhang is estimated.");
-    def->sidetext = "%";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(40));
-
-    def = this->add("scarf_joint_speed", coFloatOrPercent);
-    def->label = L("Scarf joint speed");
-    def->category = L("Quality");
-    def->tooltip  = L(
-        "This option sets the printing speed for scarf joints. It is recommended to print scarf joints at a slow speed (less than 100 "
-         "mm/s). It's also advisable to enable 'Extrusion rate smoothing' if the set speed varies significantly from the speed of the "
-         "outer or inner walls. If the speed specified here is higher than the speed of the outer or inner walls, the printer will default "
-         "to the slower of the two speeds. When specified as a percentage (e.g., 80%), the speed is calculated based on the respective "
-         "outer or inner wall speed. The default value is set to 100%.");
-    def->sidetext = L("mm/s or %");
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
-
-    def = this->add("scarf_joint_flow_ratio", coFloat);
-    def->label = L("Scarf joint flow ratio");
-    def->tooltip = L("This factor affects the amount of material for scarf joints.");
-    def->mode = comDevelop;
-    def->max = 2;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("seam_slope_start_height", coFloatOrPercent);
-    def->label = L("Scarf start height");
-    def->tooltip = L("Start height of the scarf.\n"
-                     "This amount can be specified in millimeters or as a percentage of the current layer height. The default value for this parameter is 0.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "layer_height";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
-
-    def = this->add("seam_slope_entire_loop", coBool);
-    def->label = L("Scarf around entire wall");
-    def->tooltip = L("The scarf extends to the entire length of the wall.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("seam_slope_min_length", coFloat);
-    def->label = L("Scarf length");
-    def->tooltip = L("Length of the scarf. Setting this parameter to zero effectively disables the scarf.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(20));
-
-    def = this->add("seam_slope_steps", coInt);
-    def->label = L("Scarf steps");
-    def->tooltip = L("Minimum number of segments of each scarf.");
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(10));
-
-    def = this->add("seam_slope_inner_walls", coBool);
-    def->label = L("Scarf joint for inner walls");
-    def->tooltip = L("Use scarf joint for inner walls as well.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("role_based_wipe_speed", coBool);
-    def->label = L("Role base wipe speed");
-    def->tooltip = L("The wipe speed is determined by the speed of the current extrusion role. "
-                     "e.g. if a wipe action is executed immediately following an outer wall extrusion, the speed of the outer wall extrusion will be utilized for the wipe action.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-    
-    def = this->add("wipe_on_loops", coBool);
-    def->label = L("Wipe on loops");
-    def->tooltip = L("To minimize the visibility of the seam in a closed loop extrusion, a small inward movement is executed before the extruder leaves the loop.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("wipe_before_external_loop", coBool);
-    def->label = L("Wipe before external loop");
-    def->tooltip = L("To minimize visibility of potential overextrusion at the start of an external perimeter when printing with "
-                     "Outer/Inner or Inner/Outer/Inner wall print order, the de-retraction is performed slightly on the inside from the "
-                     "start of the external perimeter. That way any potential over extrusion is hidden from the outside surface.\n\n"
-                     "This is useful when printing with Outer/Inner or Inner/Outer/Inner wall print order as in these modes it is more likely "
-                     "an external perimeter is printed immediately after a de-retraction move.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("wipe_speed", coFloatOrPercent);
-    def->label = L("Wipe speed");
-    def->tooltip = L("The wipe speed is determined by the speed setting specified in this configuration. "
-                     "If the value is expressed as a percentage (e.g. 80%), it will be calculated based on the travel speed setting above. "
-                     "The default value for this parameter is 80%.");
-    def->sidetext = L("mm/s or %");
-    def->ratio_over = "travel_speed";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(80,true));
-
-    def = this->add("skirt_distance", coFloat);
-    def->label = L("Skirt distance");
-    def->tooltip = L("The distance from the skirt to the brim or the object.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 60;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2));
-
-    def = this->add("skirt_start_angle", coFloat);
-    def->label = L("Skirt start point");
-    def->tooltip = L("Angle from the object center to skirt start point. Zero is the most right position, counter clockwise is positive angle.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = -180;
-    def->max = 180;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(-135));
-
-    def = this->add("skirt_height", coInt);
-    def->label = L("Skirt height");
-    def->tooltip = L("How many layers of skirt. Usually only one layer.");
-    def->sidetext = L("layers");
-    def->mode = comSimple;
-    def->max = 10000;
-    def->set_default_value(new ConfigOptionInt(1));
-    
-    def = this->add("single_loop_draft_shield", coBool);
-    def->label = L("Single loop after first layer");
-    def->tooltip = L("Limits the skirt/draft shield loops to one wall after the first layer. This is useful, on occasion, to conserve filament but may cause the draft shield/skirt to warp / crack.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("draft_shield", coEnum);
-    def->label = L("Draft shield");
-    def->tooltip = L("A draft shield is useful to protect an ABS or ASA print from warping and detaching from print bed due to wind draft. "
-                     "It is usually needed only with open frame printers, i.e. without an enclosure.\n\n"
-                     "Enabled = skirt is as tall as the highest printed object. Otherwise 'Skirt height' is used.\n"
-                     "Note: With the draft shield active, the skirt will be printed at skirt distance from the object. "
-                     "Therefore, if brims are active it may intersect with them. To avoid this, increase the skirt distance value.\n");
-    def->enum_keys_map = &ConfigOptionEnum<DraftShield>::get_enum_values();
-    def->enum_values.push_back("disabled");
-    def->enum_values.push_back("enabled");
-    def->enum_labels.push_back(L("Disabled"));
-    def->enum_labels.push_back(L("Enabled"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<DraftShield>(dsDisabled));
-
-    def = this->add("skirt_type", coEnum);
-    def->label = L("Skirt type");
-    def->full_label = L("Skirt type");
-    def->tooltip = L("Combined - single skirt for all objects, Per object - individual object skirt.");
-    def->enum_keys_map = &ConfigOptionEnum<SkirtType>::get_enum_values();
-    def->enum_values.push_back("combined");
-    def->enum_values.push_back("perobject");
-    def->enum_labels.push_back(L("Combined"));
-    def->enum_labels.push_back(L("Per object"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SkirtType>(stCombined));
-    
-    def = this->add("skirt_loops", coInt);
-    def->label = L("Skirt loops");
-    def->full_label = L("Skirt loops");
-    def->tooltip = L("Number of loops for the skirt. Zero means disabling skirt.");
-    def->min = 0;
-    def->max = 10;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("skirt_speed", coFloat);
-    def->label = L("Skirt speed");
-    def->full_label = L("Skirt speed");
-    def->tooltip = L("Speed of skirt, in mm/s. Zero means use default layer extrusion speed.");
-    def->min = 0;
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(50.0));
-
-    def = this->add("min_skirt_length", coFloat);
-    def->label = L("Skirt minimum extrusion length");
-    def->full_label = L("Skirt minimum extrusion length");
-    def->tooltip = L("Minimum filament extrusion length in mm when printing the skirt. Zero means this feature is disabled.\n\n"
-                     "Using a non-zero value is useful if the printer is set up to print without a prime line.\n"
-                     "Final number of loops is not taking into account while arranging or validating objects distance. Increase loop number in such case.");
-    def->min = 0;
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("slow_down_layer_time", coFloats);
-    def->label = L("Layer time");
-    def->tooltip = L("The printing speed in exported G-code will be slowed down when the estimated layer time is "
-                     "shorter than this value in order to get better cooling for these layers.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->max = 1000;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloats { 5.0f });
-
-    def = this->add("minimum_sparse_infill_area", coFloat);
-    def->label = L("Minimum sparse infill threshold");
-    def->category = L("Strength");
-    def->tooltip = L("Sparse infill area which is smaller than threshold value is replaced by internal solid infill.");
-    def->sidetext = "mmÂ²";	// square milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(15));
-
-    def = this->add("solid_infill_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Solid infill");
-    def->category = L("Extruders");
-    def->tooltip = L("Filament to print solid infill.");
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("internal_solid_infill_line_width", coFloatOrPercent);
-    def->label = L("Internal solid infill");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of internal solid infill. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("internal_solid_infill_speed", coFloat);
-    def->label = L("Internal solid infill");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of internal solid infill, not the top and bottom surface.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(100));
-
-    def = this->add("spiral_mode", coBool);
-    def->label = L("Spiral vase");
-    def->tooltip = L("Spiralize smooths out the z moves of the outer contour. "
-                     "And turns a solid model into a single walled print with solid bottom layers. "
-                     "The final generated model has no seam.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("spiral_mode_smooth", coBool);
-    def->label = L("Smooth Spiral");
-    def->tooltip = L("Smooth Spiral smooths out X and Y moves as well, "
-                     "resulting in no visible seam at all, even in the XY directions on walls that are not vertical.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("spiral_mode_max_xy_smoothing", coFloatOrPercent);
-    def->label = L("Max XY Smoothing");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Maximum distance to move points in XY to try to achieve a smooth spiral. "
-                     "If expressed as a %, it will be computed over nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(200, true));
-
-    def = this->add("spiral_starting_flow_ratio", coFloat);
-    def->label = L("Spiral starting flow ratio");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Sets the starting flow ratio while transitioning from the last bottom layer to the spiral. "
-                    "Normally the spiral transition scales the flow ratio from 0% to 100% during the first loop "
-                    "which can in some cases lead to under extrusion at the start of the spiral.");
-    def->min = 0;
-    def->max = 1;
-    def->set_default_value(new ConfigOptionFloat(0));
-    def->mode = comAdvanced;
-
-    def = this->add("spiral_finishing_flow_ratio", coFloat);
-    def->label = L("Spiral finishing flow ratio");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Sets the finishing flow ratio while ending the spiral. "
-                    "Normally the spiral transition scales the flow ratio from 100% to 0% during the last loop "
-                    "which can in some cases lead to under extrusion at the end of the spiral.");
-    def->min = 0;
-    def->max = 1;
-    def->set_default_value(new ConfigOptionFloat(0));
-    def->mode = comAdvanced;
-
-    def = this->add("timelapse_type", coEnum);
-    def->label = L("Timelapse");
-    def->tooltip = L("If smooth or traditional mode is selected, a timelapse video will be generated for each print. "
-                     "After each layer is printed, a snapshot is taken with the chamber camera. "
-                     "All of these snapshots are composed into a timelapse video when printing completes. "
-                     "If smooth mode is selected, the toolhead will move to the excess chute after each layer is printed "
-                     "and then take a snapshot. "
-                     "Since the melt filament may leak from the nozzle during the process of taking a snapshot, "
-                     "prime tower is required for smooth mode to wipe nozzle.");
-    def->enum_keys_map = &ConfigOptionEnum<TimelapseType>::get_enum_values();
-    def->enum_values.emplace_back("0");
-    def->enum_values.emplace_back("1");
-    def->enum_labels.emplace_back(L("Traditional"));
-    def->enum_labels.emplace_back(L("Smooth"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<TimelapseType>(tlTraditional));
-
-    def = this->add("standby_temperature_delta", coInt);
-    def->label = L("Temperature variation");
-    // TRN PrintSettings : "Ooze prevention" > "Temperature variation"
-    def->tooltip = L("Temperature difference to be applied when an extruder is not active. "
-                     "The value is not used when 'idle_temperature' in filament settings "
-                     "is set to non-zero value.");
-    def->sidetext = u8"âˆ†\u2103";	// delta degrees Celsius, don't need translation
-    def->min = -max_temp;
-    def->max = max_temp;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(-5));
-
-    def = this->add("preheat_time", coFloat);
-    def->label = L("Preheat time");
-    def->tooltip = L("To reduce the waiting time after tool change, Orca can preheat the next tool while the current tool is still in use. "
-                     "This setting specifies the time in seconds to preheat the next tool. Orca will insert a M104 command to preheat the tool in advance.");
-    def->sidetext = "s";	// seconds, don't need translation
-    def->min = 0;
-    def->max = 120;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(30.0));
-
-
-    def = this->add("delta_temperature", coInt);
-    def->label = L("Preheat delta temperature");
-    def->tooltip = L("Allow user to set the Preheat temperature. If target temperature is 220 and Preheat delta temperature is -30, then "
-                     "the preheat temperature will be 190");
-    def->sidetext = "âˆ†Â°C";
-    def->min     = -50;
-    def->max     = 50;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-
-    def = this->add("preheat_steps", coInt);
-    def->label = L("Preheat steps");
-    def->tooltip = L("Insert multiple preheat commands (e.g. M104.1). Only useful for Prusa XL. For other printers, please set it to 1.");
-    //def->sidetext = "";
-    def->min = 1;
-    def->max = 10;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionInt(1));
-
-
-    def = this->add("machine_start_gcode", coString);
-    def->label = L("Start G-code");
-    def->tooltip = L("Start G-code when starting the entire print.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 12;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString("G28 ; home all axes\nG1 Z5 F5000 ; lift nozzle\n"));
-
-    def = this->add("filament_start_gcode", coStrings);
-    def->label = L("Start G-code");
-    def->tooltip = L("Start G-code when starting the printing of this filament.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 12;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionStrings { " " });
-
-    def = this->add("single_extruder_multi_material", coBool);
-    def->label = L("Single Extruder Multi Material");
-    def->tooltip = L("Use single nozzle to print multi filament.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("manual_filament_change", coBool);
-    def->label = L("Manual Filament Change");
-    def->tooltip = L("Enable this option to omit the custom Change filament G-code only at the beginning of the print. "
-                    "The tool change command (e.g., T0) will be skipped throughout the entire print. "
-                    "This is useful for manual multi-material printing, where we use M600/PAUSE to trigger the manual filament change action.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("purge_in_prime_tower", coBool);
-    def->label = L("Purge in prime tower");
-    def->tooltip = L("Purge remaining filament into prime tower.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("enable_filament_ramming", coBool);
-    def->label = L("Enable filament ramming");
-    def->tooltip = L("Enable filament ramming");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("ramming_line_width_ratio", coFloat);
-    def->label = L("Ramming line width ratio");
-    def->tooltip = L(
-        "This is used to decide the line width of wipe tower when ramming, ramming line width = [this ratio] * extruder * 1.25");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2.0));
-
-    def = this->add("enable_change_pressure_when_wiping", coBool);
-    def->label = L("Enable change pressure advance when wiping");
-    def->tooltip = L("If it's set to false, the pressure advance value will not be changed.");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("ramming_pressure_advance_value", coFloat);
-    def->label = L("Pressure advance value when ramming");
-    def->tooltip = L("Set_Pressure_advance [this value] when ramming on wipe tower");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("wipe_tower_no_sparse_layers", coBool);
-    def->label = L("No sparse layers (beta)");
-    def->tooltip = L("If enabled, the wipe tower will not be printed on layers with no tool changes. "
-                    "On layers with a tool change, extruder will travel downward to print the wipe tower. "
-                    "User is responsible for ensuring there is no collision with the print.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("single_extruder_multi_material_priming", coBool);
-    def->label = L("Prime all printing extruders");
-    def->tooltip = L("If enabled, all printing extruders will be primed at the front edge of the print bed at the start of the print.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("slice_closing_radius", coFloat);
-    def->label = L("Slice gap closing radius");
-    def->category = L("Quality");
-    def->tooltip = L("Cracks smaller than 2x gap closing radius are being filled during the triangle mesh slicing. "
-        "The gap closing operation may reduce the final print resolution, therefore it is advisable to keep the value reasonably low.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.049));
-
-    def = this->add("slicing_mode", coEnum);
-    def->label = L("Slicing Mode");
-    def->category = L("Other");
-    def->tooltip = L("Use \"Even-odd\" for 3DLabPrint airplane models. Use \"Close holes\" to close all holes in the model.");
-    def->enum_keys_map = &ConfigOptionEnum<SlicingMode>::get_enum_values();
-    def->enum_values.push_back("regular");
-    def->enum_values.push_back("even_odd");
-    def->enum_values.push_back("close_holes");
-    def->enum_labels.push_back(L("Regular"));
-    def->enum_labels.push_back(L("Even-odd"));
-    def->enum_labels.push_back(L("Close holes"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SlicingMode>(SlicingMode::Regular));
-
-    def = this->add("z_offset", coFloat);
-    def->label = L("Z offset");
-    def->tooltip = L("This value will be added (or subtracted) from all the Z coordinates "
-                   "in the output G-code. It is used to compensate for bad Z endstop position: "
-                   "for example, if your endstop zero actually leaves the nozzle 0.3mm far "
-                   "from the print bed, set this to -0.3 (or fix your endstop).");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-    
-    def = this->add("enable_support", coBool);
-    //BBS: remove material behind support
-    def->label = L("Enable support");
-    def->category = L("Support");
-    def->tooltip = L("Enable support generation.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_type", coEnum);
-    def->label = L("Type");
-    def->category = L("Support");
-    def->tooltip = L("Normal (auto) and Tree (auto) are used to generate support automatically. "
-                     "If Normal (manual) or Tree (manual) is selected, only support enforcers are generated.");
-    def->enum_keys_map = &ConfigOptionEnum<SupportType>::get_enum_values();
-    def->enum_values.push_back("normal(auto)");
-    def->enum_values.push_back("tree(auto)");
-    def->enum_values.push_back("normal(manual)");
-    def->enum_values.push_back("tree(manual)");
-    def->enum_labels.push_back(L("Normal (auto)"));
-    def->enum_labels.push_back(L("Tree (auto)"));
-    def->enum_labels.push_back(L("Normal (manual)"));
-    def->enum_labels.push_back(L("Tree (manual)"));
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<SupportType>(stNormalAuto));
-
-    def = this->add("support_object_xy_distance", coFloat);
-    def->label = L("Support/object xy distance");
-    def->category = L("Support");
-    def->tooltip = L("XY separation between an object and its support.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    //Support with too small spacing may touch the object and difficult to remove.
-    def->set_default_value(new ConfigOptionFloat(0.35));
-
-    def = this->add("support_object_first_layer_gap", coFloat);
-    def->label = L("Support/object first layer gap");
-    def->category = L("Support");
-    def->tooltip = L("XY separation between an object and its support at the first layer.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    //Support with too small spacing may touch the object and difficult to remove.
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("support_angle", coFloat);
-    def->label = L("Pattern angle");
-    def->category = L("Support");
-    def->tooltip = L("Use this setting to rotate the support pattern on the horizontal plane.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 359;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("support_on_build_plate_only", coBool);
-    def->label = L("On build plate only");
-    def->category = L("Support");
-    def->tooltip = L("Don't create support on model surface, only on build plate.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    // BBS
-    def           = this->add("support_critical_regions_only", coBool);
-    def->label    = L("Support critical regions only");
-    def->category = L("Support");
-    def->tooltip  = L("Only create support for critical regions including sharp tail, cantilever, etc.");
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_remove_small_overhang", coBool);
-    def->label = L("Remove small overhangs");
-    def->category = L("Support");
-    def->tooltip = L("Remove small overhangs that possibly need no supports.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    // BBS: change type to common float.
-    // It may be rounded to mulitple layer height when independent_support_layer_height is false.
-    def = this->add("support_top_z_distance", coFloat);
-    //def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
-    def->label = L("Top Z distance");
-    def->min = 0;
-    def->category = L("Support");
-    def->tooltip = L("The Z gap between the top support interface and object.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-//    def->min = 0;
-#if 0
-    //def->enum_values.push_back("0");
-    //def->enum_values.push_back("0.1");
-    //def->enum_values.push_back("0.2");
-    //def->enum_labels.push_back(L("0 (soluble)"));
-    //def->enum_labels.push_back(L("0.1 (semi-detachable)"));
-    //def->enum_labels.push_back(L("0.2 (detachable)"));
-#endif
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("support_bottom_z_distance", coFloat);
-    def->label = L("Bottom Z distance");
-    def->category = L("Support");
-    def->tooltip = L("The Z gap between the bottom support interface and object.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("enforce_support_layers", coInt);
-    //def->label = L("Enforce support for the first");
-    def->category = L("Support");
-    //def->tooltip = L("Generate support material for the specified number of layers counting from bottom, "
-    //               "regardless of whether normal support material is enabled or not and regardless "
-    //               "of any angle threshold. This is useful for getting more adhesion of objects "
-    //               "having a very thin or poor footprint on the build plate.");
-    def->sidetext = L("layers");
-    //def->full_label = L("Enforce support for the first n layers");
-    def->min = 0;
-    def->max = 5000;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("support_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label    = L("Support/raft base");
-    def->category = L("Support");
-    def->tooltip = L("Filament to print support base and raft. \"Default\" means no specific filament for support and current filament is used.");
-    def->min = 0;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("support_interface_not_for_body",coBool);
-    def->label    = L("Avoid interface filament for base");
-    def->category = L("Support");
-    def->tooltip = L("Avoid using support interface filament to print support base if possible.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("support_line_width", coFloatOrPercent);
-    def->label = L("Support");
-    def->category = L("Quality");
-    def->tooltip = L("Line width of support. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("support_interface_loop_pattern", coBool);
-    def->label = L("Interface use loop pattern");
-    def->category = L("Support");
-    def->tooltip = L("Cover the top contact layer of the supports with loops. Disabled by default.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_interface_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label    = L("Support/raft interface");
-    def->category = L("Support");
-    def->tooltip = L("Filament to print support interface. \"Default\" means no specific filament for support interface and current filament is used.");
-    def->min = 0;
-    // BBS
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    auto support_interface_top_layers = def = this->add("support_interface_top_layers", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Top interface layers");
-    def->category = L("Support");
-    def->tooltip = L("Number of top interface layers.");
-    def->sidetext = L("layers");
-    def->min = 0;
-    def->enum_values.push_back("0");
-    def->enum_values.push_back("1");
-    def->enum_values.push_back("2");
-    def->enum_values.push_back("3");
-    def->enum_labels.push_back("0");
-    def->enum_labels.push_back("1");
-    def->enum_labels.push_back("2");
-    def->enum_labels.push_back("3");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(3));
-
-    def = this->add("support_interface_bottom_layers", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Bottom interface layers");
-    def->category = L("Support");
-    def->tooltip = L("Number of bottom interface layers.");
-    def->sidetext = L("layers");
-    def->min = -1;
-    def->enum_values.push_back("-1");
-    append(def->enum_values, support_interface_top_layers->enum_values);
-    def->enum_labels.push_back(L("Same as top"));
-    append(def->enum_labels, support_interface_top_layers->enum_labels);
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("support_interface_spacing", coFloat);
-    def->label = L("Top interface spacing");
-    def->category = L("Support");
-    def->tooltip = L("Spacing of interface lines. Zero means solid interface.\n"
-                     "Force using solid interface when support ironing is enabled.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    //BBS
-    def = this->add("support_bottom_interface_spacing", coFloat);
-    def->label = L("Bottom interface spacing");
-    def->category = L("Support");
-    def->tooltip = L("Spacing of bottom interface lines. Zero means solid interface.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("support_interface_speed", coFloat);
-    def->label = L("Support interface");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of support interface.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(80));
-
-    def = this->add("support_base_pattern", coEnum);
-    def->label = L("Base pattern");
-    def->category = L("Support");
-    def->tooltip = L("Line pattern of support.");
-    def->enum_keys_map = &ConfigOptionEnum<SupportMaterialPattern>::get_enum_values();
-    def->enum_values.push_back("default");
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("rectilinear-grid");
-    def->enum_values.push_back("honeycomb");
-    def->enum_values.push_back("lightning");
-    def->enum_values.push_back("hollow");
-    def->enum_labels.push_back(L("Default"));
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Rectilinear grid"));
-    def->enum_labels.push_back(L("Honeycomb"));
-    def->enum_labels.push_back(L("Lightning"));
-    def->enum_labels.push_back(L("Hollow"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SupportMaterialPattern>(smpDefault));
-
-    def = this->add("support_interface_pattern", coEnum);
-    def->label = L("Interface pattern");
-    def->category = L("Support");
-    def->tooltip = L("Line pattern of support interface. "
-                     "Default pattern for non-soluble support interface is Rectilinear, "
-                     "while default pattern for soluble support interface is Concentric.");
-    def->enum_keys_map = &ConfigOptionEnum<SupportMaterialInterfacePattern>::get_enum_values();
-    def->enum_values.push_back("auto");
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("concentric");
-    def->enum_values.push_back("rectilinear_interlaced");
-    def->enum_values.push_back("grid");
-    def->enum_labels.push_back(L("Default"));
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Concentric"));
-    def->enum_labels.push_back(L("Rectilinear Interlaced"));
-    def->enum_labels.push_back(L("Grid"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SupportMaterialInterfacePattern>(smipAuto));
-
-    def = this->add("support_base_pattern_spacing", coFloat);
-    def->label = L("Base pattern spacing");
-    def->category = L("Support");
-    def->tooltip = L("Spacing between support lines.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2.5));
-
-    def = this->add("support_expansion", coFloat);
-    def->label = L("Normal Support expansion");
-    def->category = L("Support");
-    def->tooltip = L("Expand (+) or shrink (-) the horizontal span of normal support.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("support_speed", coFloat);
-    def->label = L("Support");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of support.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(80));
-
-    def = this->add("support_style", coEnum);
-    def->label = L("Style");
-    def->category = L("Support");
-    def->tooltip = L("Style and shape of the support. For normal support, projecting the supports into a regular grid "
-                     "will create more stable supports (default), while snug support towers will save material and reduce "
-                     "object scarring.\n"
-                     "For tree support, slim and organic style will merge branches more aggressively and save "
-                     "a lot of material (default organic), while hybrid style will create similar structure to normal support "
-                     "under large flat overhangs.");
-    def->enum_keys_map = &ConfigOptionEnum<SupportMaterialStyle>::get_enum_values();
-    def->enum_values.push_back("default");
-    def->enum_values.push_back("grid");
-    def->enum_values.push_back("snug");
-    def->enum_values.push_back("organic");
-    def->enum_values.push_back("tree_slim");
-    def->enum_values.push_back("tree_strong");
-    def->enum_values.push_back("tree_hybrid");
-    def->enum_labels.push_back(L("Default (Grid/Organic)"));
-    def->enum_labels.push_back(L("Grid"));
-    def->enum_labels.push_back(L("Snug"));
-    def->enum_labels.push_back(L("Organic"));
-    def->enum_labels.push_back(L("Tree Slim"));
-    def->enum_labels.push_back(L("Tree Strong"));
-    def->enum_labels.push_back(L("Tree Hybrid"));
-
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsDefault));
-
-    def = this->add("independent_support_layer_height", coBool);
-    def->label = L("Independent support layer height");
-    def->category = L("Support");
-    def->tooltip = L("Support layer uses layer height independent with object layer. This is to support customizing z-gap and save print time. "
-                     "This option will be invalid when the prime tower is enabled.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_threshold_angle", coInt);
-    def->label = L("Threshold angle");
-    def->category = L("Support");
-    def->tooltip = L("Support will be generated for overhangs whose slope angle is below the threshold.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 90;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionInt(30));
-
-    def = this->add("support_threshold_overlap", coFloatOrPercent);
-    def->label = L("Threshold overlap");
-    def->category = L("Support");
-    def->tooltip = L("If threshold angle is zero, support will be generated for overhangs whose overlap is below the threshold. The smaller this value is, the steeper the overhang that can be printed without support.");
-    def->sidetext = L("mm or %");
-    def->min = 0;
-    def->max = 100;
-    def->max_literal = 0.5;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloatOrPercent(50., true));
-
-    def = this->add("tree_support_branch_angle", coFloat);
-    def->label = L("Tree support branch angle");
-    def->category = L("Support");
-    def->tooltip = L("This setting determines the maximum overhang angle that the branches of tree support are allowed to make. "
-                     "If the angle is increased, the branches can be printed more horizontally, allowing them to reach farther.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 60;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(40.));
-
-    def = this->add("tree_support_branch_angle_organic", coFloat);
-    def->label = L("Tree support branch angle");
-    def->category = L("Support");
-    def->tooltip = L("This setting determines the maximum overhang angle that the branches of tree support are allowed to make. "
-                     "If the angle is increased, the branches can be printed more horizontally, allowing them to reach farther.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 60;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(40.));
-
-    def = this->add("tree_support_angle_slow", coFloat);
-    def->label = L("Preferred Branch Angle");
-    def->category = L("Support");
-    // TRN PrintSettings: "Organic supports" > "Preferred Branch Angle"
-    def->tooltip = L("The preferred angle of the branches, when they do not have to avoid the model. "
-                     "Use a lower angle to make them more vertical and more stable. Use a higher angle for branches to merge faster.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 10;
-    def->max = 85;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(25));
-
-    def           = this->add("tree_support_branch_distance", coFloat);
-    def->label    = L("Tree support branch distance");
-    def->category = L("Support");
-    def->tooltip  = L("This setting determines the distance between neighboring tree support nodes.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 1.0;
-    def->max      = 10;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.));
-
-    def           = this->add("tree_support_branch_distance_organic", coFloat);
-    def->label    = L("Tree support branch distance");
-    def->category = L("Support");
-    def->tooltip  = L("This setting determines the distance between neighboring tree support nodes.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 1.0;
-    def->max      = 10;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("tree_support_top_rate", coPercent);
-    def->label = L("Branch Density");
-    def->category = L("Support");
-    // TRN PrintSettings: "Organic supports" > "Branch Density"
-    def->tooltip = L("Adjusts the density of the support structure used to generate the tips of the branches. "
-                     "A higher value results in better overhangs but the supports are harder to remove, "
-                     "thus it is recommended to enable top support interfaces instead of a high branch density value "
-                     "if dense interfaces are needed.");
-    def->sidetext = "%";
-    def->min = 5;
-    def->max_literal = 35;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(30));
-
-    def = this->add("tree_support_adaptive_layer_height", coBool);
-    def->label = L("Adaptive layer height");
-    def->category = L("Quality");
-    def->tooltip = L("Enabling this option means the height of tree support layer except the first will be automatically calculated.");
-    def->set_default_value(new ConfigOptionBool(1));
-    
-    def = this->add("tree_support_auto_brim", coBool);
-    def->label = L("Auto brim width");
-    def->category = L("Quality");
-    def->tooltip = L("Enabling this option means the width of the brim for tree support will be automatically calculated.");
-    def->set_default_value(new ConfigOptionBool(1));
-    
-    def = this->add("tree_support_brim_width", coFloat);
-    def->label = L("Tree support brim width");
-    def->category = L("Quality");
-    def->min      = 0.0;
-    def->tooltip = L("Distance from tree branch to the outermost brim line.");
-    def->set_default_value(new ConfigOptionFloat(3));
-
-    def = this->add("tree_support_tip_diameter", coFloat);
-    def->label = L("Tip Diameter");
-    def->category = L("Support");
-    // TRN PrintSettings: "Organic supports" > "Tip Diameter"
-    def->tooltip = L("Branch tip diameter for organic supports.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0.1f;
-    def->max = 100.f;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.8));
-
-    def           = this->add("tree_support_branch_diameter", coFloat);
-    def->label    = L("Tree support branch diameter");
-    def->category = L("Support");
-    def->tooltip  = L("This setting determines the initial diameter of support nodes.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 1.0;
-    def->max      = 10;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.));
-
-    def = this->add("tree_support_branch_diameter_angle", coFloat);
-    // TRN PrintSettings: #lmFIXME 
-    def->label = L("Branch Diameter Angle");
-    def->category = L("Support");
-    // TRN PrintSettings: "Organic supports" > "Branch Diameter Angle"
-    def->tooltip = L("The angle of the branches' diameter as they gradually become thicker towards the bottom. "
-                     "An angle of 0 will cause the branches to have uniform thickness over their length. "
-                     "A bit of an angle can increase stability of the organic support.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->min = 0;
-    def->max = 15;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5));
-
-    def           = this->add("tree_support_branch_diameter_organic", coFloat);
-    def->label    = L("Tree support branch diameter");
-    def->category = L("Support");
-    def->tooltip  = L("This setting determines the initial diameter of support nodes.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min      = 1.0;
-    def->max      = 10;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2.));
-
-    def = this->add("tree_support_wall_count", coInt);
-    def->label = L("Support wall loops");
-    def->category = L("Support");
-    def->tooltip = L("This setting specifies the count of support walls in the range of [0,2]. 0 means auto.");
-    def->min = 0;
-    def->max = 2;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("tree_support_with_infill", coBool);
-    def->label = L("Tree support with infill");
-    def->category = L("Support");
-    def->tooltip = L("This setting specifies whether to add infill inside large hollows of tree support.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-    
-    def = this->add("support_ironing", coBool);
-    def->label = L("Ironing Support Interface");
-    def->category = L("Support");
-    def->tooltip = L("Ironing is using small flow to print on same height of support interface again to make it more smooth. "
-                     "This setting controls whether support interface being ironed. When enabled, support interface will be extruded as solid too.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def                = this->add("support_ironing_pattern", coEnum);
-    def->label         = L("Support Ironing Pattern");
-    def->tooltip       = L("The pattern that will be used when ironing.");
-    def->category      = L("Support");
-    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
-    def->enum_values.push_back("rectilinear");
-    def->enum_values.push_back("concentric");
-    def->enum_labels.push_back(L("Rectilinear"));
-    def->enum_labels.push_back(L("Concentric"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    
-    def = this->add("support_ironing_flow", coPercent);
-    def->label = L("Support Ironing flow");
-    def->category = L("Support");
-    def->tooltip = L("The amount of material to extrude during ironing. Relative to flow of normal support interface layer height. "
-                     "Too high value results in overextrusion on the surface.");
-    def->sidetext = "%";
-    def->ratio_over = "layer_height";
-    def->min = 0;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(10));
-
-    def = this->add("support_ironing_spacing", coFloat);
-    def->label = L("Support Ironing line spacing");
-    def->category = L("Support");
-    def->tooltip = L("The distance between the lines of ironing.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.1));
-
-    def = this->add("activate_chamber_temp_control",coBools);
-    def->label = L("Activate temperature control");
-    def->tooltip = L("Enable this option for automated chamber temperature control. "
-                     "This option activates the emitting of an M191 command before the \"machine_start_gcode\"\n which sets the chamber temperature and waits until it is reached. "
-                     "In addition, it emits an M141 command at the end of the print to turn off the chamber heater, if present.\n\n"
-                     "This option relies on the firmware supporting the M191 and M141 commands either via macros or natively and is usually used when an active chamber heater is installed.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBools{false});
-
-    def = this->add("chamber_temperature", coInts);
-    def->label = L("Chamber temperature");
-    def->tooltip = L("For high-temperature materials like ABS, ASA, PC, and PA, a higher chamber temperature can help "
-                     "suppress or reduce warping and potentially lead to higher interlayer bonding strength. "
-                     "However, at the same time, a higher chamber temperature will reduce the efficiency of air "
-                     "filtration for ABS and ASA.\n\n"
-                     "For PLA, PETG, TPU, PVA, and other low-temperature materials, this option should be disabled "
-                     "(set to 0) as the chamber temperature should be low to avoid extruder clogging caused by "
-                     "material softening at the heat break.\n\n"
-                     "If enabled, this parameter also sets a G-code variable named chamber_temperature, which can be "
-                     "used to pass the desired chamber temperature to your print start macro, or a heat soak macro "
-                     "like this: PRINT_START (other variables) CHAMBER_TEMP=[chamber_temperature]. "
-                     "This may be useful if your printer does not support M141/M191 commands, or if you desire "
-                     "to handle heat soaking in the print start macro if no active chamber heater is installed."
-                    );
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Chamber temperature");
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("nozzle_temperature", coInts);
-    def->label = L("Other layers");
-    def->tooltip = L("Nozzle temperature for layers after the initial one.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->full_label = L("Nozzle temperature");
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts { 200 });
-
-    def = this->add("nozzle_temperature_range_low", coInts);
-    def->label = L("Min");
-    //def->tooltip = L("");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts { 190 });
-
-    def = this->add("nozzle_temperature_range_high", coInts);
-    def->label = L("Max");
-    //def->tooltip = L("");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts { 240 });
-
-    def = this->add("head_wrap_detect_zone", coPoints);
-    def->label = "Head wrap detect zone"; //do not need translation
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionPoints{});
-
-    def = this->add("detect_thin_wall", coBool);
-    def->label = L("Detect thin wall");
-    def->category = L("Strength");
-    def->tooltip = L("Detect thin wall which can't contain two line width. And use single line to print. "
-                     "Maybe printed not very well, because it's not closed loop.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("change_filament_gcode", coString);
-    def->label = L("Change filament G-code");
-    def->tooltip = L("This G-code is inserted when filament is changed, including T commands to trigger tool change.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 5;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("change_extrusion_role_gcode", coString);
-    def->label = L("Change extrusion role G-code");
-    def->tooltip = L("This G-code is inserted when the extrusion role is changed.");
-    def->multiline = true;
-    def->full_width = true;
-    def->height = 5;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("top_surface_line_width", coFloatOrPercent);
-    def->label = L("Top surface");
-    def->category = L("Quality");
-    def->tooltip = L("Line width for top surfaces. If expressed as a %, it will be computed over the nozzle diameter.");
-    def->sidetext = L("mm or %");
-    def->ratio_over = "nozzle_diameter";
-    def->min = 0;
-    def->max = 1000;
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
-
-    def = this->add("top_surface_speed", coFloat);
-    def->label = L("Top surface");
-    def->category = L("Speed");
-    def->tooltip = L("Speed of top surface infill which is solid.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(100));
-
-    def = this->add("top_shell_layers", coInt);
-    def->label = L("Top shell layers");
-    def->category = L("Strength");
-    def->sidetext = L("layers"); // ORCA add side text
-    def->tooltip = L("This is the number of solid layers of top shell, including the top "
-                     "surface layer. When the thickness calculated by this value is thinner "
-                     "than top shell thickness, the top shell layers will be increased.");
-    def->full_label = L("Top solid layers");
-    def->min = 0;
-    def->set_default_value(new ConfigOptionInt(4));
-
-    def = this->add("top_shell_thickness", coFloat);
-    def->label = L("Top shell thickness");
-    def->category = L("Strength");
-    def->tooltip = L("The number of top solid layers is increased when slicing if the thickness calculated by top shell layers is "
-                     "thinner than this value. This can avoid having too thin shell when layer height is small. 0 means that "
-                     "this setting is disabled and thickness of top shell is absolutely determined by top shell layers.");
-    def->full_label = L("Top shell thickness");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.6));
-
-    def = this->add("top_surface_density", coPercent);
-    def->label = L("Top surface density");
-    def->category = L("Strength");
-    def->tooltip = L("Density of top surface layer. A value of 100% creates a fully solid, smooth top layer. "
-                     "Reducing this value results in a textured top surface, according to the chosen top surface pattern. "
-                     "A value of 0% will result in only the walls on the top layer being created. "
-                     "Intended for aesthetic or functional purposes, not to fix issues such as over-extrusion.");
-    def->sidetext = ("%");
-    def->min = 0;
-    def->max = 100;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-    def           = this->add("bottom_surface_density", coPercent);
-    def->label    = L("Bottom surface density");
-    def->category = L("Strength");
-    def->tooltip = L("Density of the bottom surface layer. "
-                     "Intended for aesthetic or functional purposes, not to fix issues such as over-extrusion.\n"
-                     "WARNING: Lowering this value may negatively affect bed adhesion.");
-    def->sidetext = ("%");
-    def->min      = 10;
-    def->max      = 100;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-
-    def = this->add("travel_speed", coFloat);
-    def->label = L("Travel");
-    def->tooltip = L("Speed of travel which is faster and without extrusion.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(120));
-
-    def = this->add("travel_speed_z", coFloat);
-    //def->label = L("Z travel");
-    //def->tooltip = L("Speed of vertical travel along z axis. "
-    //                 "This is typically lower because build plate or gantry is hard to be moved. "
-    //                 "Zero means using travel speed directly in G-code, but will be limited by printer's ability when run G-code.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->min = 0;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("wipe", coBools);
-    def->label = L("Wipe while retracting");
-    def->tooltip = L("Move nozzle along the last extrusion path when retracting to clean any leaked material on the nozzle. "
-                     "This can minimize blobs when printing a new part after traveling.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { false });
-
-    def = this->add("wipe_distance", coFloats);
-    def->label = L("Wipe Distance");
-    def->tooltip = L("Describe how long the nozzle will move along the last path when retracting.\n\n"
-                     "Depending on how long the wipe operation lasts, how fast and long the extruder/filament retraction settings are, "
-                     "a retraction move may be needed to retract the remaining filament.\n\n"
-                     "Setting a value in the retract amount before wipe setting below will perform any excess retraction before the wipe, else it will be performed after.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 1. });
-
-    def = this->add("enable_prime_tower", coBool);
-    def->label = L("Enable");
-    def->tooltip = L("The wiping tower can be used to clean up the residue on the nozzle and stabilize the chamber pressure inside the nozzle, "
-                    "in order to avoid appearance defects when printing objects.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("flush_volumes_vector", coFloats);
-    // BBS: remove _L()
-    def->label = ("Purging volumes - load/unload volumes");
-    //def->tooltip = L("This vector saves required volumes to change from/to each tool used on the "
-    //                 "wipe tower. These values are used to simplify creation of the full purging "
-    //                 "volumes below.");
-
-    // BBS: change 70.f => 140.f
-    def->set_default_value(new ConfigOptionFloats { 140.f, 140.f, 140.f, 140.f, 140.f, 140.f, 140.f, 140.f });
-
-    def = this->add("flush_volumes_matrix", coFloats);
-    def->label = L("Purging volumes");
-    //def->tooltip = L("This matrix describes volumes (in cubic milimetres) required to purge the"
-    //                 " new filament on the wipe tower for any given pair of tools.");
-    // BBS: change 140.f => 280.f
-    def->set_default_value(new ConfigOptionFloats {   0.f, 280.f, 280.f, 280.f,
-                                                    280.f,   0.f, 280.f, 280.f,
-                                                    280.f, 280.f,   0.f, 280.f,
-                                                    280.f, 280.f, 280.f,   0.f });
-
-    def = this->add("flush_multiplier", coFloat);
-    def->label = L("Flush multiplier");
-    def->tooltip = L("The actual flushing volumes is equal to the flush multiplier multiplied by the flushing volumes in the table.");
-    //def->sidetext = "";
-    def->set_default_value(new ConfigOptionFloat(0.3));
-
-    // BBS
-    def = this->add("prime_volume", coFloat);
-    def->label = L("Prime volume");
-    def->tooltip = L("The volume of material to prime extruder on tower.");
-    def->sidetext = u8"mmÂ³";	// cubic milimeters, don't need translation
-    def->min = 1.0;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(45.));
-
-    def = this->add("wipe_tower_x", coFloats);
-    //def->label = L("Position X");
-    //def->tooltip = L("X coordinate of the left front corner of a wipe tower.");
-    //def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comDevelop;
-    // BBS: change data type to floats to add partplate logic
-    def->set_default_value(new ConfigOptionFloats{ 15. });
-
-    def = this->add("wipe_tower_y", coFloats);
-    //def->label = L("Position Y");
-    //def->tooltip = L("Y coordinate of the left front corner of a wipe tower.");
-    //def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comDevelop;
-    // BBS: change data type to floats to add partplate logic
-    def->set_default_value(new ConfigOptionFloats{ 220. });
-
-    def = this->add("prime_tower_width", coFloat);
-    def->label = L("Width");
-    def->tooltip = L("Width of the prime tower.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 2.0;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(60.));
-
-    def = this->add("wipe_tower_rotation_angle", coFloat);
-    def->label = L("Wipe tower rotation angle");
-    def->tooltip = L("Wipe tower rotation angle with respect to X axis.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("prime_tower_brim_width", coFloat);
-    def->label = L("Brim width");
-    def->tooltip = L("Width of the brim.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.;
-    def->set_default_value(new ConfigOptionFloat(3.));
-
-    def = this->add("prime_tower_brim_chamfer", coBool);
-    def->label = L("Brim chamfer");
-    def->tooltip = L("Enable gradual layer-by-layer reduction of the brim around the prime tower. "
-                     "This creates a chamfered/tapered effect, reducing material usage while "
-                     "maintaining first layer adhesion.");
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("prime_tower_brim_chamfer_max_width", coFloat);
-    def->label = L("Max chamfer width");
-    def->tooltip = L("Maximum width of the chamfer zone measured from the tower perimeter. "
-                     "The brim will reduce within this distance. Larger values create a more "
-                     "gradual taper but take more layers to complete.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comDevelop;
-    def->min = 0.;
-    def->set_default_value(new ConfigOptionFloat(4.0));
-
-    def = this->add("wipe_tower_cone_angle", coFloat);
-    def->label = L("Stabilization cone apex angle");
-    def->tooltip = L("Angle at the apex of the cone that is used to stabilize the wipe tower. "
-                     "Larger angle means wider base.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.;
-    def->max = 90.;
-    def->set_default_value(new ConfigOptionFloat(30.0));
-    
-    def = this->add("wipe_tower_max_purge_speed", coFloat);
-    def->label = L("Maximum wipe tower print speed of out wall");
-    def->tooltip = L("Maximum wipe tower print speed of out wall.");
-    def->sidetext = "mm/s";	// milimeters per second, don't need translation
-    def->mode = comAdvanced;
-    def->min = 10;
-    def->set_default_value(new ConfigOptionFloat(90.));
-
-    def = this->add("wipe_tower_wall_type", coEnum);
-    def->label = L("Wall type");
-    def->tooltip = L("Wipe tower outer wall type.\n"
-                    "1. Rectangle: The default wall type, a rectangle with fixed width and height.\n"
-                    "2. Cone: A cone with a fillet at the bottom to help stabilize the wipe tower.\n"
-                    "3. Rib: Adds four ribs to the tower wall for enhanced stability.");
-    def->enum_keys_map = &ConfigOptionEnum<WipeTowerWallType>::get_enum_values();
-    def->enum_values.emplace_back("rectangle");
-    def->enum_values.emplace_back("cone");
-    def->enum_values.emplace_back("rib");
-    def->enum_labels.emplace_back("Rectangle");
-    def->enum_labels.emplace_back("Cone");
-    def->enum_labels.emplace_back("Rib");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<WipeTowerWallType>(wtwRectangle));
-
-    def           = this->add("wipe_tower_extra_rib_length", coFloat);
-    def->label    = L("Extra rib length");
-    def->tooltip  = L("Positive values can increase the size of the rib wall, while negative values can reduce the size. "
-                       "However, the size of the rib wall can not be smaller than that determined by the cleaning volume.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->max      = 300;
-    def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def           = this->add("wipe_tower_rib_width", coFloat);
-    def->label    = L("Rib width");
-    def->tooltip  = L("Rib width.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode     = comAdvanced;
-    def->min      = 0;
-    def->set_default_value(new ConfigOptionFloat(8));
-
-    def          = this->add("wipe_tower_fillet_wall", coBool);
-    def->label   = L("Fillet wall");
-    def->tooltip = L("The wall of prime tower will fillet.");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("wipe_tower_filament", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Wipe tower");
-    def->category = L("Extruders");
-    def->tooltip = L("The extruder to use when printing perimeter of the wipe tower. "
-                     "Set to 0 to use the one that is available (non-soluble would be preferred).");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def          = this->add("wipe_tower_wall_gap", coBool);
-    def->label   = L("Wall gap");
-    def->tooltip = L("Create small gaps in the wipe tower outer wall at tool change entry points. "
-                     "The first extrusion path after a filament change will enter through the gap, "
-                     "leaving the filament blob on the gap edge instead of on the outer wall surface.");
-    def->mode    = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("wiping_volumes_extruders", coFloats);
-    def->label = L("Purging volumes - load/unload volumes");
-    def->tooltip = L("This vector saves required volumes to change from/to each tool used on the "
-                     "wipe tower. These values are used to simplify creation of the full purging "
-                     "volumes below.");
-    def->set_default_value(new ConfigOptionFloats { 70., 70., 70., 70., 70., 70., 70., 70., 70., 70.  });
-
-    def = this->add("flush_into_infill", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into objects' infill");
-    def->tooltip = L("Purging after filament change will be done inside objects' infills. "
-        "This may lower the amount of waste and decrease the print time. "
-        "If the walls are printed with transparent filament, the mixed color infill will be seen outside. "
-        "It will not take effect, unless the prime tower is enabled.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("flush_into_support", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into objects' support");
-    def->tooltip = L("Purging after filament change will be done inside objects' support. "
-        "This may lower the amount of waste and decrease the print time. "
-        "It will not take effect, unless the prime tower is enabled.");
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("flush_into_objects", coBool);
-    def->category = L("Flush options");
-    def->label = L("Flush into this object");
-    def->tooltip = L("This object will be used to purge the nozzle after a filament change to save filament and decrease the print time. "
-        "Colors of the objects will be mixed as a result. "
-        "It will not take effect unless the prime tower is enabled.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("wipe_tower_bridging", coFloat);
-    def->label = L("Maximal bridging distance");
-    def->tooltip = L("Maximal distance between supports on sparse infill sections.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10.));
-
-    def = this->add("wipe_tower_extra_spacing", coPercent);
-    def->label = L("Wipe tower purge lines spacing");
-    def->tooltip = L("Spacing of purge lines on the wipe tower.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 100.;
-    def->max = 300.;
-    def->set_default_value(new ConfigOptionPercent(100.));
-
-    def = this->add("wipe_tower_extra_flow", coPercent);
-    def->label = L("Extra flow for purging");
-    def->tooltip = L("Extra flow used for the purging lines on the wipe tower. This makes the purging lines thicker or narrower "
-                     "than they normally would be. The spacing is adjusted automatically.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 100.;
-    def->max = 300.;
-    def->set_default_value(new ConfigOptionPercent(100.));
-
-    def = this->add("local_z_wipe_tower_purge_lines", coFloat);
-    def->label = L("Local-Z mini wipe lines");
-    def->tooltip = L("Number of purge lines reserved for each runtime Local-Z wipe tower toolchange. "
-                     "Higher values improve cleanup but increase tower depth. "
-                     "Only used when Local-Z dithering and the prime tower are enabled.");
-    def->sidetext = L("lines");
-    def->mode = comAdvanced;
-    def->min = 1.0;
-    def->set_default_value(new ConfigOptionFloat(3.0));
-
-    def = this->add("idle_temperature", coInts);
-    def->label = L("Idle temperature");
-    def->tooltip = L("Nozzle temperature when the tool is currently not used in multi-tool setups. "
-                     "This is only used when 'Ooze prevention' is active in Print Settings. Set to 0 to disable.");
-    def->sidetext = u8"\u2103" /* Â°C */;	// degrees Celsius, don't need translation
-    def->min = 0;
-    def->max = max_temp;
-    def->set_default_value(new ConfigOptionInts{0});
-
-    def = this->add("filament_tower_ironing_area", coFloats);
-    def->label = L("Tower ironing area");
-    def->tooltip = L("Ironing area for prime tower interface layer (where different materials meet).");
-    def->sidetext = L("mmÂ²");
-    def->min = 0;
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloats{4.});
-
-    def = this->add("xy_hole_compensation", coFloat);
-    def->label = L("X-Y hole compensation");
-    def->category = L("Quality");
-    def->tooltip = L("Holes in objects will expand or contract in the XY plane by the configured value. "
-                     "Positive values make holes bigger, negative values make holes smaller. "
-                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("xy_contour_compensation", coFloat);
-    def->label = L("X-Y contour compensation");
-    def->category = L("Quality");
-    def->tooltip = L("Contours of objects will expand or contract in the XY plane by the configured value. "
-                     "Positive values make contours bigger, negative values make contours smaller. "
-                     "This function is used to adjust sizes slightly when the objects have assembling issues.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("hole_to_polyhole", coBool);
-    def->label = L("Convert holes to polyholes");
-    def->category = L("Quality");
-    def->tooltip = L("Search for almost-circular holes that span more than one layer and convert the geometry to polyholes."
-                     " Use the nozzle size and the (biggest) diameter to compute the polyhole."
-                     "\nSee http://hydraraptor.blogspot.com/2011/02/polyholes.html");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("hole_to_polyhole_threshold", coFloatOrPercent);
-    def->label = L("Polyhole detection margin");
-    def->category = L("Quality");
-    // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Maximum defection of a point to the estimated radius of the circle."
-                     "\nAs cylinders are often exported as triangles of varying size, points may not be on the circle circumference."
-                     " This setting allows you some leeway to broaden the detection."
-                     "\nIn mm or in % of the radius.");
-    def->sidetext = L("mm or %");
-    def->max_literal = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0.01, false));
-
-    def = this->add("hole_to_polyhole_twisted", coBool);
-    def->label = L("Polyhole twist");
-    def->category = L("Quality");
-    def->tooltip = L("Rotate the polyhole every layer.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("thumbnails", coString);
-    def->label = L("G-code thumbnails");
-    def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"");
-    def->mode = comAdvanced;
-    def->gui_type = ConfigOptionDef::GUIType::one_string;
-    def->set_default_value(new ConfigOptionString("48x48/PNG,300x300/PNG"));
-
-    def = this->add("thumbnails_format", coEnum);
-    def->label = L("Format of G-code thumbnails");
-    def->tooltip = L("Format of G-code thumbnails: PNG for best quality, JPG for smallest size, QOI for low memory firmware.");
-    def->mode = comAdvanced;
-    def->enum_keys_map = &ConfigOptionEnum<GCodeThumbnailsFormat>::get_enum_values();
-    def->enum_values.push_back("PNG");
-    def->enum_values.push_back("JPG");
-    def->enum_values.push_back("QOI");
-    def->enum_values.push_back("BTT_TFT");
-    def->enum_values.push_back("COLPIC");
-    def->enum_labels.push_back("PNG");
-    def->enum_labels.push_back("JPG");
-    def->enum_labels.push_back("QOI");
-    def->enum_labels.push_back("BTT TT");
-    def->enum_labels.push_back("ColPic");
-    def->set_default_value(new ConfigOptionEnum<GCodeThumbnailsFormat>(GCodeThumbnailsFormat::PNG));
-
-    def = this->add("use_relative_e_distances", coBool);
-    def->label = L("Use relative E distances");
-    def->tooltip = L("Relative extrusion is recommended when using \"label_objects\" option. "
-                   "Some extruders work better with this option unchecked (absolute extrusion mode). "
-                   "Wipe tower is only compatible with relative mode. It is recommended on "
-                   "most printers. Default is checked.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("wall_generator", coEnum);
-    def->label = L("Wall generator");
-    def->category = L("Quality");
-    def->tooltip = L("Classic wall generator produces walls with constant extrusion width and for "
-        "very thin areas is used gap-fill. "
-        "Arachne engine produces walls with variable extrusion width.");
-    def->enum_keys_map = &ConfigOptionEnum<PerimeterGeneratorType>::get_enum_values();
-    def->enum_values.push_back("classic");
-    def->enum_values.push_back("arachne");
-    def->enum_labels.push_back(L("Classic"));
-    def->enum_labels.push_back(L("Arachne"));
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
-
-    def = this->add("wall_transition_length", coPercent);
-    def->label = L("Wall transition length");
-    def->category = L("Quality");
-    def->tooltip = L("When transitioning between different numbers of walls as the part becomes "
-        "thinner, a certain amount of space is allotted to split or join the wall segments. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(100));
-
-    def = this->add("wall_transition_filter_deviation", coPercent);
-    def->label = L("Wall transitioning filter margin");
-    def->category = L("Quality");
-    def->tooltip = L("Prevent transitioning back and forth between one extra wall and one less. This "
-        "margin extends the range of extrusion widths which follow to [Minimum wall width "
-        "- margin, 2 * Minimum wall width + margin]. Increasing this margin "
-        "reduces the number of transitions, which reduces the number of extrusion "
-        "starts/stops and travel time. However, large extrusion width variation can lead to "
-        "under- or overextrusion problems. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def = this->add("wall_transition_angle", coFloat);
-    def->label = L("Wall transitioning threshold angle");
-    def->category = L("Quality");
-    def->tooltip = L("When to create transitions between even and odd numbers of walls. A wedge shape with"
-        " an angle greater than this setting will not have transitions and no walls will be "
-        "printed in the center to fill the remaining space. Reducing this setting reduces "
-        "the number and length of these center walls, but may leave gaps or overextrude.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->mode = comAdvanced;
-    def->min = 1.;
-    def->max = 59.;
-    def->set_default_value(new ConfigOptionFloat(10.));
-
-    def = this->add("wall_distribution_count", coInt);
-    def->label = L("Wall distribution count");
-    def->category = L("Quality");
-    def->tooltip = L("The number of walls, counted from the center, over which the variation needs to be "
-        "spread. Lower values mean that the outer walls don't change in width.");
-    def->mode = comAdvanced;
-    def->min = 1;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("min_feature_size", coPercent);
-    def->label = L("Minimum feature size");
-    def->category = L("Quality");
-    def->tooltip = L("Minimum thickness of thin features. Model features that are thinner than this value will not be printed, "
-                     "while features thicker than than this value will be widened to the minimum wall width. "
-                     "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(25));
-
-    def = this->add("min_length_factor", coFloat);
-    def->label = L("Minimum wall length");
-    def->category = L("Quality");
-    def->tooltip = L("Adjust this value to prevent short, unclosed walls from being printed, which could increase print time. "
-    "Higher values remove more and longer walls.\n\n"
-    "NOTE: Bottom and top surfaces will not be affected by this value to prevent visual gaps on the outside of the model. "
-    "Adjust 'One wall threshold' in the Advanced settings below to adjust the sensitivity of what is considered a top-surface. "
-    "'One wall threshold' is only visible if this setting is set above the default value of 0.5, or if single-wall top surfaces is enabled.");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->mode = comAdvanced;
-    def->min = 0.0;
-    def->max = 25.0;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("initial_layer_min_bead_width", coPercent);
-    def->label = L("First layer minimum wall width");
-    def->category = L("Quality");
-    def->tooltip = L("The minimum wall width that should be used for the first layer is recommended to be set "
-                     "to the same size as the nozzle. This adjustment is expected to enhance adhesion.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(85));
-
-    def = this->add("min_bead_width", coPercent);
-    def->label = L("Minimum wall width");
-    def->category = L("Quality");
-    def->tooltip = L("Width of the wall that will replace thin features (according to the Minimum feature size) "
-        "of the model. If the Minimum wall width is thinner than the thickness of the feature,"
-        " the wall will become as thick as the feature itself. "
-        "It's expressed as a percentage over nozzle diameter.");
-    def->sidetext = "%";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionPercent(85));
-
-    // Declare retract values for filament profile, overriding the printer's extruder profile.
-    for (const char *opt_key : {
-        // floats
-        "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed", "retract_restart_extra", "retraction_minimum_travel",
-        // BBS: floats
-        "wipe_distance",
-        // bools
-        "retract_when_changing_layer", "wipe",
-        // percents
-        "retract_before_wipe",
-        "long_retractions_when_cut",
-        "retraction_distances_when_cut",
-        "retract_length_toolchange",
-        "retract_restart_extra_toolchange"
-        }) {
-        auto it_opt = options.find(opt_key);
-        assert(it_opt != options.end());
-        def = this->add_nullable(std::string("filament_") + opt_key, it_opt->second.type);
-        def->label 		= it_opt->second.label;
-        def->full_label = it_opt->second.full_label;
-        def->tooltip 	= it_opt->second.tooltip;
-        def->sidetext   = it_opt->second.sidetext;
-        def->enum_keys_map = it_opt->second.enum_keys_map;
-        def->enum_labels   = it_opt->second.enum_labels;
-        def->enum_values   = it_opt->second.enum_values;
-        def->min        = it_opt->second.min;
-        def->max        = it_opt->second.max;
-        //BBS: shown specific filament retract config because we hide the machine retract into comDevelop mode
-        if ((strcmp(opt_key, "retraction_length") == 0) ||
-            (strcmp(opt_key, "z_hop") == 0)||
-            (strcmp(opt_key, "long_retractions_when_cut") == 0)||
-            (strcmp(opt_key, "retraction_distances_when_cut") == 0))
-            def->mode       = comSimple;
-        else
-            def->mode       = comAdvanced;
-        switch (def->type) {
-        case coFloats   : def->set_default_value(new ConfigOptionFloatsNullable  (static_cast<const ConfigOptionFloats*  >(it_opt->second.default_value.get())->values)); break;
-        case coPercents : def->set_default_value(new ConfigOptionPercentsNullable(static_cast<const ConfigOptionPercents*>(it_opt->second.default_value.get())->values)); break;
-        case coBools    : def->set_default_value(new ConfigOptionBoolsNullable   (static_cast<const ConfigOptionBools*   >(it_opt->second.default_value.get())->values)); break;
-        case coEnums    : def->set_default_value(new ConfigOptionEnumsGenericNullable(static_cast<const ConfigOptionEnumsGeneric*   >(it_opt->second.default_value.get())->values)); break;
-        default: assert(false);
-        }
-    }
-
-    def = this->add("detect_narrow_internal_solid_infill", coBool);
-    def->label = L("Detect narrow internal solid infill");
-    def->category = L("Strength");
-    def->tooltip = L("This option will auto-detect narrow internal solid infill areas. "
-                     "If enabled, the concentric pattern will be used for the area to speed up printing. "
-                     "Otherwise, the rectilinear pattern will be used by default.");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-}
-
-void PrintConfigDef::init_extruder_option_keys()
-{
-    // ConfigOptionFloats, ConfigOptionPercents, ConfigOptionBools, ConfigOptionStrings
-    m_extruder_option_keys = {
-        "nozzle_diameter", "min_layer_height", "max_layer_height", "extruder_offset",
-        "retraction_length", "z_hop", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
-        "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "extruder_colour",
-        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut"
-    };
-
-    m_extruder_retract_keys = {
-        "deretraction_speed",
-        "long_retractions_when_cut",
-        "retract_before_wipe",
-        "retract_lift_above",
-        "retract_lift_below",
-        "retract_lift_enforce",
-        "retract_restart_extra",
-        "retract_when_changing_layer",
-        "retraction_distances_when_cut",
-        "retraction_length",
-        "retraction_minimum_travel",
-        "retraction_speed",
-        "travel_slope",
-        "wipe",
-        "wipe_distance",
-        "z_hop",
-        "z_hop_types",
-        "z_hop_when_prime",
-        "retract_length_toolchange",
-        "retract_restart_extra_toolchange"
-    };
-    assert(std::is_sorted(m_extruder_retract_keys.begin(), m_extruder_retract_keys.end()));
-}
-
-void PrintConfigDef::init_filament_option_keys()
-{
-    m_filament_option_keys = {
-        "filament_diameter", "min_layer_height", "max_layer_height",
-        "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
-        "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "filament_colour",
-        "filament_multi_colors", "filament_colour_mode",
-        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut"/*,"filament_seam_gap"*/
-    };
-
-    m_filament_retract_keys = {
-        "deretraction_speed",
-        "long_retractions_when_cut",
-        "retract_before_wipe",
-        "retract_lift_above",
-        "retract_lift_below",
-        "retract_lift_enforce",
-        "retract_restart_extra",
-        "retract_when_changing_layer",
-        "retraction_distances_when_cut",
-        "retraction_length",
-        "retraction_minimum_travel",
-        "retraction_speed",
-        "wipe",
-        "wipe_distance",
-        "z_hop",
-        "z_hop_types",
-        "retract_length_toolchange",
-        "retract_restart_extra_toolchange",
-    };
-    assert(std::is_sorted(m_filament_retract_keys.begin(), m_filament_retract_keys.end()));
-}
-
-void PrintConfigDef::init_sla_params()
-{
-    ConfigOptionDef* def;
-
-    // SLA Printer settings
-
-    def = this->add("display_width", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->min = 1;
-    def->set_default_value(new ConfigOptionFloat(120.));
-
-    def = this->add("display_height", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->min = 1;
-    def->set_default_value(new ConfigOptionFloat(68.));
-
-    def = this->add("display_pixels_x", coInt);
-    //def->full_label = L("");
-    def->label = ("X");
-    //def->tooltip = L("");
-    def->min = 100;
-    def->set_default_value(new ConfigOptionInt(2560));
-
-    def = this->add("display_pixels_y", coInt);
-    //def->full_label = L("");
-    def->label = ("Y");
-    //def->tooltip = L("");
-    def->min = 100;
-    def->set_default_value(new ConfigOptionInt(1440));
-
-    def = this->add("display_mirror_x", coBool);
-    //def->full_label = L("");
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("display_mirror_y", coBool);
-    //def->full_label = L("");
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("display_orientation", coEnum);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->enum_keys_map = &ConfigOptionEnum<SLADisplayOrientation>::get_enum_values();
-    def->enum_values.push_back("landscape");
-    def->enum_values.push_back("portrait");
-    def->enum_labels.push_back(" ");
-    def->enum_labels.push_back(" ");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SLADisplayOrientation>(sladoPortrait));
-
-    def = this->add("fast_tilt_time", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.));
-
-    def = this->add("slow_tilt_time", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(8.));
-
-    def = this->add("area_fill", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(50.));
-
-    def = this->add("relative_correction", coFloats);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats( { 1., 1.} ));
-
-    def = this->add("relative_correction_x", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("relative_correction_y", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("relative_correction_z", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("absolute_correction", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("elefant_foot_min_width", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("gamma_correction", coFloat);
-    //def->label = L("");
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-
-    // SLA Material settings.
-
-    def = this->add("material_colour", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->gui_type = ConfigOptionDef::GUIType::color;
-    def->set_default_value(new ConfigOptionString("#29B2B2"));
-
-    def = this->add("material_type", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->gui_type = ConfigOptionDef::GUIType::f_enum_open;   // TODO: ???
-    def->gui_flags = "show_value";
-    def->enum_values.push_back("Tough");
-    def->enum_values.push_back("Flexible");
-    def->enum_values.push_back("Casting");
-    def->enum_values.push_back("Dental");
-    def->enum_values.push_back("Heat-resistant");
-    def->set_default_value(new ConfigOptionString("Tough"));
-
-    def = this->add("initial_layer_height", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.3));
-
-    def = this->add("bottle_volume", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 50;
-    def->set_default_value(new ConfigOptionFloat(1000.0));
-
-    def = this->add("bottle_weight", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("material_density", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("bottle_cost", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("faded_layers", coInt);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->min = 3;
-    def->max = 20;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(10));
-
-    def = this->add("min_exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("max_exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(100));
-
-    def = this->add("exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(10));
-
-    def = this->add("min_initial_exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("max_initial_exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(150));
-
-    def = this->add("initial_exposure_time", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(15));
-
-    def = this->add("material_correction", coFloats);
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats( { 1., 1., 1. } ));
-
-    def = this->add("material_correction_x", coFloat);
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("material_correction_y", coFloat);
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("material_correction_z", coFloat);
-    //def->full_label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("material_vendor", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("default_sla_material_profile", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("sla_material_settings_id", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("default_sla_print_profile", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("sla_print_settings_id", coString);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    def = this->add("supports_enable", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("support_head_front_diameter", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.4));
-
-    def = this->add("support_head_penetration", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->mode = comAdvanced;
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(0.2));
-
-    def = this->add("support_head_width", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 20;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("support_pillar_diameter", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 15;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("support_small_pillar_diameter_percent", coPercent);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 1;
-    def->max = 100;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(50));
-
-    def = this->add("support_max_bridges_on_pillar", coInt);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->max = 50;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(3));
-
-    def = this->add("support_pillar_connection_mode", coEnum);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->enum_keys_map = &ConfigOptionEnum<SLAPillarConnectionMode>::get_enum_values();
-    def->enum_values.push_back("zigzag");
-    def->enum_values.push_back("cross");
-    def->enum_values.push_back("dynamic");
-    def->enum_labels.push_back(" ");
-    def->enum_labels.push_back(" ");
-    def->enum_labels.push_back(" ");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SLAPillarConnectionMode>(slapcmDynamic));
-
-    def = this->add("support_buildplate_only", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("support_pillar_widening_factor", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.0));
-
-    def = this->add("support_base_diameter", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 30;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(4.0));
-
-    def = this->add("support_base_height", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.0));
-
-    def = this->add("support_base_safety_distance", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("support_critical_angle", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 90;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(45));
-
-    def = this->add("support_max_bridge_length", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(15.0));
-
-    def = this->add("support_max_pillar_link_distance", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;   // 0 means no linking
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10.0));
-
-    def = this->add("support_object_elevation", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 150; // This is the max height of print on SL1
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(5.0));
-
-    def = this->add("support_points_density_relative", coInt);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->set_default_value(new ConfigOptionInt(100));
-
-    def = this->add("support_points_minimal_distance", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->set_default_value(new ConfigOptionFloat(1.));
-
-    def = this->add("pad_enable", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("pad_wall_thickness", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 30;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(2.0));
-
-    def = this->add("pad_wall_height", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->category = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 30;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.));
-
-    def = this->add("pad_brim_size", coFloat);
-    //def->label = L("");
-    //def->tooltip = L("");
-    //def->category = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 30;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1.6));
-
-    def = this->add("pad_max_merge_distance", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(50.0));
-
-    def = this->add("pad_wall_slope", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 45;
-    def->max = 90;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(90.0));
-
-    def = this->add("pad_around_object", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("pad_around_object_everywhere", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("pad_object_gap", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(1));
-
-    def = this->add("pad_object_connector_stride", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10));
-
-    def = this->add("pad_object_connector_width", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("pad_object_connector_penetration", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.3));
-
-    def = this->add("hollowing_enable", coBool);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("hollowing_min_thickness", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    //def->sidetext = "";
-    def->min = 1;
-    def->max = 10;
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionFloat(3.));
-
-    def = this->add("hollowing_quality", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->min = 0;
-    def->max = 1;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(0.5));
-
-    def = this->add("hollowing_closing_distance", coFloat);
-    //def->label = L("");
-    //def->category = L("");
-    //def->tooltip = L("");
-    def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 10;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(2.0));
-
-    def = this->add("material_print_speed", coEnum);
-    //def->label = L("");
-    //def->tooltip = L("");
-    def->enum_keys_map = &ConfigOptionEnum<SLAMaterialSpeed>::get_enum_values();
-    def->enum_values.push_back("slow");
-    def->enum_values.push_back("fast");
-    def->enum_labels.push_back(" ");
-    def->enum_labels.push_back(" ");
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<SLAMaterialSpeed>(slamsFast));
-}
-
-void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &value)
-{
-    //BBS: handle legacy options
-    if (opt_key == "enable_wipe_tower") {
-        opt_key = "enable_prime_tower";
-    } else if (opt_key == "wipe_tower_width") {
-        opt_key = "prime_tower_width";
-    } else if (opt_key == "wiping_volume") {
-        opt_key = "prime_volume";
-    } else if (opt_key == "wipe_tower_brim_width") {
-        opt_key = "prime_tower_brim_width";
-    } else if (opt_key == "tool_change_gcode") {
-        opt_key = "change_filament_gcode";
-    } else if (opt_key == "bridge_fan_speed") {
-        opt_key = "overhang_fan_speed";
-    } else if (opt_key == "infill_extruder") {
-        opt_key = "sparse_infill_filament";
-    }else if (opt_key == "solid_infill_extruder") {
-        opt_key = "solid_infill_filament";
-    }else if (opt_key == "perimeter_extruder") {
-        opt_key = "wall_filament";
-    }else if(opt_key == "wipe_tower_extruder") {
-        opt_key = "wipe_tower_filament";
-    }else if (opt_key == "support_material_extruder") {
-        opt_key = "support_filament";
-    } else if (opt_key == "support_material_interface_extruder") {
-        opt_key = "support_interface_filament";
-    } else if (opt_key == "support_material_angle") {
-        opt_key = "support_angle";
-    } else if (opt_key == "support_material_enforce_layers") {
-        opt_key = "enforce_support_layers";
-    } else if ((opt_key == "initial_layer_print_height"   ||
-                opt_key == "initial_layer_speed"          ||
-                opt_key == "internal_solid_infill_speed"  ||
-                opt_key == "top_surface_speed"            ||
-                opt_key == "support_interface_speed"      ||
-                opt_key == "outer_wall_speed"             ||
-                opt_key == "support_object_xy_distance")     && value.find("%") != std::string::npos) {
-        //BBS: this is old profile in which value is expressed as percentage.
-        //But now these key-value must be absolute value.
-        //Reset to default value by erasing these key to avoid parsing error.
-        opt_key = "";
-    } else if (opt_key == "inherits_cummulative") {
-        opt_key = "inherits_group";
-    } else if (opt_key == "compatible_printers_condition_cummulative") {
-        opt_key = "compatible_machine_expression_group";
-    } else if (opt_key == "compatible_prints_condition_cummulative") {
-        opt_key = "compatible_process_expression_group";
-    } else if (opt_key == "cooling") {
-        opt_key = "slow_down_for_layer_cooling";
-    } else if (opt_key == "timelapse_no_toolhead") {
-        opt_key = "timelapse_type";
-    } else if (opt_key == "timelapse_type" && value == "2") {
-        // old file "0" is None, "2" is Traditional
-        // new file "0" is Traditional, erase "2"
-        value = "0";
-    } else if (opt_key == "support_type" && value == "normal") {
-        value = "normal(manual)";
-    } else if (opt_key == "support_type" && value == "tree") {
-        value = "tree(manual)";
-    } else if (opt_key == "support_type" && value == "hybrid(auto)") {
-        value = "tree(auto)";
-    } else if (opt_key == "support_base_pattern" && value == "none") {
-        value = "hollow";
-    } else if (opt_key == "different_settings_to_system") {
-        std::string copy_value = value;
-        copy_value.erase(std::remove(copy_value.begin(), copy_value.end(), '\"'), copy_value.end()); // remove '"' in string
-        std::set<std::string> split_keys = SplitStringAndRemoveDuplicateElement(copy_value, ";");
-        for (std::string split_key : split_keys) {
-            std::string copy_key = split_key, copy_value = "";
-            handle_legacy(copy_key, copy_value);
-            if (copy_key != split_key) {
-                ReplaceString(value, split_key, copy_key);
-            }
-        }
-    } else if (opt_key == "overhang_fan_threshold" && value == "5%") {
-        value = "10%";
-    }else if( opt_key == "wall_infill_order" ) {
-        if (value == "inner wall/outer wall/infill" || value == "infill/inner wall/outer wall") {
-            opt_key = "wall_sequence";
-            value = "inner wall/outer wall";
-        } else if (value == "outer wall/inner wall/infill" || value == "infill/outer wall/inner wall") {
-            opt_key = "wall_sequence";
-            value = "outer wall/inner wall";
-        } else if (value == "inner-outer-inner wall/infill") {
-            opt_key = "wall_sequence";
-            value = "inner-outer-inner wall";
-        } else {
-            opt_key = "wall_sequence";
-        }
-    }
-    else if(opt_key == "ensure_vertical_shell_thickness") {
-        if(value == "1") {
-            value = "ensure_all";
-        }
-        else if (value == "0"){
-            value = "ensure_moderate";
-        }
-    } else if (opt_key == "rotate_solid_infill_direction") {
-        opt_key = "solid_infill_rotate_template";
-        if (value == "1") {
-            value = "0,90";
-        } else if (value == "0") {
-            value = "0";
-        }
-    } else if (opt_key == "sparse_infill_anchor") {
-        opt_key = "infill_anchor";
-    } else if (opt_key == "sparse_infill_anchor_max") {
-        opt_key = "infill_anchor_max";
-    } else if (opt_key == "chamber_temperatures") {
-        opt_key = "chamber_temperature";
-    } else if (opt_key == "thumbnail_size") {
-        opt_key = "thumbnails";
-    } else if (opt_key == "top_one_wall_type" && value != "none") {
-        opt_key = "only_one_wall_top";
-        value = "1";
-    } else if (opt_key == "initial_layer_flow_ratio") {
-        opt_key = "bottom_solid_infill_flow_ratio";
-    } else if (opt_key == "ironing_direction") {
-        opt_key = "ironing_angle";
-    } else if (opt_key == "counterbole_hole_bridging") {
-        opt_key = "counterbore_hole_bridging";
-    } else if (opt_key == "draft_shield" && value == "limited") {
-        value = "disabled";
-    } else if ((opt_key == "sparse_infill_pattern"         ||
-                opt_key == "top_surface_pattern"           ||
-                opt_key == "bottom_surface_pattern"        ||
-                opt_key == "internal_solid_infill_pattern" ||
-                opt_key == "ironing_pattern"               ||
-                opt_key == "support_ironing_pattern") && value == "zig-zag") {
-        value = "rectilinear";
-    }
-
-    // Ignore the following obsolete configuration keys:
-    static std::set<std::string> ignore = {
-        "acceleration", "scale", "rotate", "duplicate", "duplicate_grid",
-        "bed_size",
-        "print_center", "g0", "wipe_tower_per_color_wipe", 
-        "support_sharp_tails","support_remove_small_overhangs", "support_with_sheath",
-        "tree_support_collision_resolution", "tree_support_with_infill",
-        "max_volumetric_speed", "max_print_speed",
-        "support_closing_radius",
-        "remove_freq_sweep", "remove_bed_leveling", "remove_extrusion_calibration",
-        "support_transition_line_width", "support_transition_speed", "bed_temperature", "bed_temperature_initial_layer",
-        "can_switch_nozzle_type", "can_add_auxiliary_fan", "extra_flush_volume", "spaghetti_detector", "adaptive_layer_height",
-        "z_hop_type", "z_lift_type", "bed_temperature_difference","long_retraction_when_cut",
-        "retraction_distance_when_cut",
-        "extruder_type",
-        "internal_bridge_support_thickness","extruder_clearance_max_radius", "top_area_threshold", "reduce_wall_solid_infill","filament_load_time","filament_unload_time",
-        "smooth_coefficient", "overhang_totally_speed", "silent_mode",
-    };
-
-    if (ignore.find(opt_key) != ignore.end()) {
-        opt_key = "";
-        return;
-    }
-
-    if (! print_config_def.has(opt_key)) {
-        opt_key = "";
-        return;
-    }
-}
-
-// Called after a config is loaded as a whole.
-// Perform composite conversions, for example merging multiple keys into one key.
-// Don't convert single options here, implement such conversion in PrintConfigDef::handle_legacy() instead.
-void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
-{
-    if (config.has("thumbnails")) {
-        std::string extention;
-        if (config.has("thumbnails_format")) {
-            if (const ConfigOptionDef* opt = config.def()->get("thumbnails_format")) {
-                extention = opt->enum_values.at(config.option("thumbnails_format")->getInt());
-            }
-        }
-
-        std::string thumbnails_str = config.opt_string("thumbnails");
-        auto [thumbnails_list, errors] = GCodeThumbnails::make_and_check_thumbnail_list(thumbnails_str, extention);
-
-        if (errors != enum_bitmask<ThumbnailError>()) {
-            std::string error_str = "\n" + Slic3r::format("Invalid value provided for parameter %1%: %2%", "thumbnails", thumbnails_str);
-            error_str += GCodeThumbnails::get_error_string(errors);
-            throw BadOptionValueException(error_str);
-        }
-
-        if (!thumbnails_list.empty()) {
-            const auto& extentions = ConfigOptionEnum<GCodeThumbnailsFormat>::get_enum_names();
-            thumbnails_str.clear();
-            for (const auto& [ext, size] : thumbnails_list)
-                thumbnails_str += Slic3r::format("%1%x%2%/%3%, ", size.x(), size.y(), extentions[int(ext)]);
-            thumbnails_str.resize(thumbnails_str.length() - 2);
-
-            config.set_key_value("thumbnails", new ConfigOptionString(thumbnails_str));
-        }
-    }
-
-    if (config.has("wiping_volumes_matrix") && !config.has("wiping_volumes_use_custom_matrix")) {
-        // This is apparently some pre-2.7.3 config, where the wiping_volumes_matrix was always used.
-        // The 2.7.3 introduced an option to use defaults derived from config. In case the matrix
-        // contains only default values, switch it to default behaviour. The default values
-        // were zeros on the diagonal and 140 otherwise.
-        std::vector<double> matrix = config.opt<ConfigOptionFloats>("wiping_volumes_matrix")->values;
-        int num_of_extruders = int(std::sqrt(matrix.size()) + 0.5);
-        int i = -1;
-        bool custom = false;
-        for (int j = 0; j < int(matrix.size()); ++j) {
-            if (j % num_of_extruders == 0)
-                ++i;
-            if (i != j % num_of_extruders && !is_approx(matrix[j], 140.)) {
-                custom = true;
-                break;
-            }
-        }
-        config.set_key_value("wiping_volumes_use_custom_matrix", new ConfigOptionBool(custom));
-    }
-}
-
-const PrintConfigDef print_config_def;
-
-DynamicPrintConfig DynamicPrintConfig::full_print_config()
-{
-	return DynamicPrintConfig((const PrintRegionConfig&)FullPrintConfig::defaults());
-}
-
-DynamicPrintConfig::DynamicPrintConfig(const StaticPrintConfig& rhs) : DynamicConfig(rhs, rhs.keys_ref())
-{
-}
-
-DynamicPrintConfig* DynamicPrintConfig::new_from_defaults_keys(const std::vector<std::string> &keys)
-{
-    auto *out = new DynamicPrintConfig();
-    out->apply_only(FullPrintConfig::defaults(), keys);
-    return out;
-}
-
-double min_object_distance(const ConfigBase &cfg)
-{
-    const ConfigOptionEnum<PrinterTechnology> *opt_printer_technology = cfg.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology");
-    auto printer_technology = opt_printer_technology ? opt_printer_technology->value : ptUnknown;
-
-    double ret = 0.;
-
-    if (printer_technology == ptSLA)
-        ret = 6.;
-    else {
-        //BBS: duplicate_distance seam to be useless
-        constexpr double duplicate_distance = 6.;
-        auto ecr_opt = cfg.option<ConfigOptionFloat>("extruder_clearance_radius");
-        auto co_opt  = cfg.option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-
-        if (!ecr_opt || !co_opt)
-            ret = 0.;
-        else {
-            // min object distance is max(duplicate_distance, clearance_radius)
-            ret = ((co_opt->value == PrintSequence::ByObject) && ecr_opt->value > duplicate_distance) ?
-                      ecr_opt->value : duplicate_distance;
-        }
-    }
-
-    return ret;
-}
-
-void DynamicPrintConfig::normalize_fdm(int used_filaments)
-{
-    if (this->has("extruder")) {
-        int extruder = this->option("extruder")->getInt();
-        this->erase("extruder");
-        if (extruder != 0) {
-            if (!this->has("sparse_infill_filament"))
-                this->option("sparse_infill_filament", true)->setInt(extruder);
-            if (!this->has("wall_filament"))
-                this->option("wall_filament", true)->setInt(extruder);
-            // Don't propagate the current extruder to support.
-            // For non-soluble supports, the default "0" extruder means to use the active extruder,
-            // for soluble supports one certainly does not want to set the extruder to non-soluble.
-            // if (!this->has("support_filament"))
-            //     this->option("support_filament", true)->setInt(extruder);
-            // if (!this->has("support_interface_filament"))
-            //     this->option("support_interface_filament", true)->setInt(extruder);
-        }
-    }
-
-    if (this->has("wipe_tower_filament")) {
-        // If invalid, replace with 0.
-        int extruder      = this->opt<ConfigOptionInt>("wipe_tower_filament")->value;
-        int num_extruders = this->opt<ConfigOptionFloats>("nozzle_diameter")->size();
-        if (extruder < 0 || extruder > num_extruders)
-            this->option("wipe_tower_filament")->setInt(0);
-    }
-
-    if (!this->has("solid_infill_filament") && this->has("sparse_infill_filament"))
-        this->option("solid_infill_filament", true)->setInt(this->option("sparse_infill_filament")->getInt());
-
-    if (this->has("spiral_mode") && this->opt<ConfigOptionBool>("spiral_mode", true)->value) {
-        {
-            // this should be actually done only on the spiral layers instead of all
-            auto* opt = this->opt<ConfigOptionBools>("retract_when_changing_layer", true);
-            opt->values.assign(opt->values.size(), false);  // set all values to false
-            // Disable retract on layer change also for filament overrides.
-            auto* opt_n = this->opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
-            opt_n->values.assign(opt_n->values.size(), false);  // Set all values to false.
-        }
-        {
-            this->opt<ConfigOptionInt>("wall_loops", true)->value       = 1;
-            this->opt<ConfigOptionBool>("alternate_extra_wall", true)->value = false;
-            this->opt<ConfigOptionInt>("top_shell_layers", true)->value = 0;
-            this->opt<ConfigOptionPercent>("sparse_infill_density", true)->value = 0;
-        }
-    }
-
-    if (auto *opt_gcode_resolution = this->opt<ConfigOptionFloat>("resolution", false); opt_gcode_resolution)
-        // Resolution will be above 1um.
-        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);
-
-    // BBS
-    ConfigOptionBool* ept_opt = this->option<ConfigOptionBool>("enable_prime_tower");
-    if (used_filaments > 0 && ept_opt != nullptr) {
-        ConfigOptionBool* islh_opt = this->option<ConfigOptionBool>("independent_support_layer_height", true);
-        //ConfigOptionBool* alh_opt = this->option<ConfigOptionBool>("adaptive_layer_height");
-        ConfigOptionEnum<PrintSequence>* ps_opt = this->option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-
-        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
-        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || ps_opt->value == PrintSequence::ByObject)) {
-            ept_opt->value = false;
-        }
-
-        if (ept_opt->value) {
-            if (islh_opt)
-                islh_opt->value = false;
-            //if (alh_opt)
-            //    alh_opt->value = false;
-        }
-        /* BBS: MusangKing - not sure if this is still valid, just comment it out cause "Independent support layer height" is re-opened.
-        else {
-            if (islh_opt)
-                islh_opt->value = true;
-        }
-        */
-    }
-}
-
-//BBS:divide normalize_fdm to 2 steps and call them one by one in Print::Apply
-void DynamicPrintConfig::normalize_fdm_1()
-{
-    if (this->has("extruder")) {
-        int extruder = this->option("extruder")->getInt();
-        this->erase("extruder");
-        if (extruder != 0) {
-            if (!this->has("sparse_infill_filament"))
-                this->option("sparse_infill_filament", true)->setInt(extruder);
-            if (!this->has("wall_filament"))
-                this->option("wall_filament", true)->setInt(extruder);
-            // Don't propagate the current extruder to support.
-            // For non-soluble supports, the default "0" extruder means to use the active extruder,
-            // for soluble supports one certainly does not want to set the extruder to non-soluble.
-            // if (!this->has("support_filament"))
-            //     this->option("support_filament", true)->setInt(extruder);
-            // if (!this->has("support_interface_filament"))
-            //     this->option("support_interface_filament", true)->setInt(extruder);
-        }
-    }
-
-    if (!this->has("solid_infill_filament") && this->has("sparse_infill_filament"))
-        this->option("solid_infill_filament", true)->setInt(this->option("sparse_infill_filament")->getInt());
-
-    if (this->has("spiral_mode") && this->opt<ConfigOptionBool>("spiral_mode", true)->value) {
-        {
-            // this should be actually done only on the spiral layers instead of all
-            auto* opt = this->opt<ConfigOptionBools>("retract_when_changing_layer", true);
-            opt->values.assign(opt->values.size(), false);  // set all values to false
-            // Disable retract on layer change also for filament overrides.
-            auto* opt_n = this->opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
-            opt_n->values.assign(opt_n->values.size(), false);  // Set all values to false.
-        }
-        {
-            this->opt<ConfigOptionInt>("wall_loops", true)->value       = 1;
-            this->opt<ConfigOptionBool>("alternate_extra_wall", true)->value = false;
-            this->opt<ConfigOptionInt>("top_shell_layers", true)->value = 0;
-            this->opt<ConfigOptionPercent>("sparse_infill_density", true)->value = 0;
-        }
-    }
-
-    if (auto *opt_gcode_resolution = this->opt<ConfigOptionFloat>("resolution", false); opt_gcode_resolution)
-        // Resolution will be above 1um.
-        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);
-
-    return;
-}
-
-t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int used_filaments)
-{
-    t_config_option_keys changed_keys;
-    ConfigOptionBool* ept_opt = this->option<ConfigOptionBool>("enable_prime_tower");
-    if (used_filaments > 0 && ept_opt != nullptr) {
-        ConfigOptionBool* islh_opt = this->option<ConfigOptionBool>("independent_support_layer_height", true);
-        //ConfigOptionBool* alh_opt = this->option<ConfigOptionBool>("adaptive_layer_height");
-        ConfigOptionEnum<PrintSequence>* ps_opt = this->option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-
-        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
-        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || (ps_opt->value == PrintSequence::ByObject && num_objects > 1))) {
-            if (ept_opt->value) {
-                ept_opt->value = false;
-                changed_keys.push_back("enable_prime_tower");
-            }
-            //ept_opt->value = false;
-        }
-
-        if (ept_opt->value) {
-            if (islh_opt) {
-                if (islh_opt->value) {
-                    islh_opt->value = false;
-                    changed_keys.push_back("independent_support_layer_height");
-                }
-                //islh_opt->value = false;
-            }
-            //if (alh_opt) {
-            //    if (alh_opt->value) {
-            //        alh_opt->value = false;
-            //        changed_keys.push_back("adaptive_layer_height");
-            //    }
-            //    //alh_opt->value = false;
-            //}
-        }
-        /* BBSï¼šMusangKing - use "global->support->Independent support layer height" widget to replace previous assignment
-        else {
-            if (islh_opt) {
-                if (!islh_opt->value) {
-                    islh_opt->value = true;
-                    changed_keys.push_back("independent_support_layer_height");
-                }
-                //islh_opt->value = true;
-            }
-        }
-        */
-    }
-
-    return changed_keys;
-}
-
-void  handle_legacy_sla(DynamicPrintConfig &config)
-{
-    for (std::string corr : {"relative_correction", "material_correction"}) {
-        if (config.has(corr)) {
-            if (std::string corr_x = corr + "_x"; !config.has(corr_x)) {
-                auto* opt = config.opt<ConfigOptionFloat>(corr_x, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];
-            }
-
-            if (std::string corr_y = corr + "_y"; !config.has(corr_y)) {
-                auto* opt = config.opt<ConfigOptionFloat>(corr_y, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];
-            }
-
-            if (std::string corr_z = corr + "_z"; !config.has(corr_z)) {
-                auto* opt = config.opt<ConfigOptionFloat>(corr_z, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[1];
-            }
-        }
-    }
-}
-
-void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
-{
-    const auto &defaults = FullPrintConfig::defaults();
-    for (const std::string &key : print_config_def.extruder_option_keys()) {
-        if (key == "default_filament_profile")
-            // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
-            // empty fields there, if not defined by the system profile.
-            continue;
-        auto *opt = this->option(key, false);
-        assert(opt != nullptr);
-        assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_extruders, defaults.option(key));
-    }
-}
-
-// BBS
-void DynamicPrintConfig::set_num_filaments(unsigned int num_filaments)
-{
-    const auto& defaults = FullPrintConfig::defaults();
-    for (const std::string& key : print_config_def.filament_option_keys()) {
-        if (key == "default_filament_profile")
-            // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
-            // empty fields there, if not defined by the system profile.
-            continue;
-        auto* opt = this->option(key, false);
-        assert(opt != nullptr);
-        assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_filaments, defaults.option(key));
-    }
-}
-
-//BBS: pass map to recording all invalid valies
-std::map<std::string, std::string> DynamicPrintConfig::validate(bool under_cli)
-{
-    // Full print config is initialized from the defaults.
-    const ConfigOption *opt = this->option("printer_technology", false);
-    auto printer_technology = (opt == nullptr) ? ptFFF : static_cast<PrinterTechnology>(dynamic_cast<const ConfigOptionEnumGeneric*>(opt)->value);
-    switch (printer_technology) {
-    case ptFFF:
-    {
-        FullPrintConfig fpc;
-        fpc.apply(*this, true);
-        // Verify this print options through the FullPrintConfig.
-        return Slic3r::validate(fpc, under_cli);
-    }
-    default:
-        //FIXME no validation on SLA data?
-        return std::map<std::string, std::string>();
-    }
-}
-
-std::string DynamicPrintConfig::get_filament_type(std::string &displayed_filament_type, int id)
-{
-    auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_ids"));
-    auto* filament_type = dynamic_cast<const ConfigOptionStrings*>(this->option("filament_type"));
-    auto* filament_is_support = dynamic_cast<const ConfigOptionBools*>(this->option("filament_is_support"));
-
-    if (!filament_type)
-        return "";
-
-    if (!filament_is_support) {
-        if (filament_type) {
-            displayed_filament_type = filament_type->get_at(id);
-            return filament_type->get_at(id);
-        }
-        else {
-            displayed_filament_type = "";
-            return "";
-        }
-    }
-    else {
-        bool is_support = filament_is_support ? filament_is_support->get_at(id) : false;
-        if (is_support) {
-            if (filament_id) {
-                if (filament_id->get_at(id) == "GFS00") {
-                    displayed_filament_type = "Sup.PLA";
-                    return "PLA-S";
-                }
-                else if (filament_id->get_at(id) == "GFS01") {
-                    displayed_filament_type = "Sup.PA";
-                    return "PA-S";
-                }
-                else {
-                    if (filament_type->get_at(id) == "PLA") {
-                        displayed_filament_type = "Sup.PLA";
-                        return "PLA-S";
-                    }
-                    else if (filament_type->get_at(id) == "PA") {
-                        displayed_filament_type = "Sup.PA";
-                        return "PA-S";
-                    }
-                    else {
-                        displayed_filament_type = filament_type->get_at(id);
-                        return filament_type->get_at(id);
-                    }
-                }
-            }
-            else {
-                if (filament_type->get_at(id) == "PLA") {
-                    displayed_filament_type = "Sup.PLA";
-                    return "PLA-S";
-                } else if (filament_type->get_at(id) == "PA") {
-                    displayed_filament_type = "Sup.PA";
-                    return "PA-S";
-                } else {
-                    displayed_filament_type = filament_type->get_at(id);
-                    return filament_type->get_at(id);
-                }
-            }
-        }
-        else {
-            displayed_filament_type = filament_type->get_at(id);
-            return filament_type->get_at(id);
-        }
-    }
-    return "PLA";
-}
-
-bool DynamicPrintConfig::is_custom_defined()
-{
-    auto* is_custom_defined = dynamic_cast<const ConfigOptionStrings*>(this->option("is_custom_defined"));
-    if (!is_custom_defined || is_custom_defined->empty())
-        return false;
-    if (is_custom_defined->get_at(0) == "1")
-        return true;
-    return false;
-}
-
-//BBS: pass map to recording all invalid valies
-//FIXME localize this function.
-std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool under_cli)
-{
-    std::map<std::string, std::string> error_message;
-    // --layer-height
-    if (cfg.get_abs_value("layer_height") <= 0) {
-        error_message.emplace("layer_height", L("invalid value ") + std::to_string(cfg.get_abs_value("layer_height")));
-    }
-    else if (fabs(fmod(cfg.get_abs_value("layer_height"), SCALING_FACTOR)) > 1e-4) {
-        error_message.emplace("layer_height", L("invalid value ") + std::to_string(cfg.get_abs_value("layer_height")));
-    }
-
-    // --first-layer-height
-    if (cfg.initial_layer_print_height.value <= 0) {
-        error_message.emplace("initial_layer_print_height", L("invalid value ") + std::to_string(cfg.initial_layer_print_height.value));
-    }
-
-    // --filament-diameter
-    for (double fd : cfg.filament_diameter.values)
-        if (fd < 1) {
-            error_message.emplace("filament_diameter", L("invalid value ") + cfg.filament_diameter.serialize());
-            break;
-        }
-
-    // --nozzle-diameter
-    for (double nd : cfg.nozzle_diameter.values)
-        if (nd < 0.005) {
-            error_message.emplace("nozzle_diameter", L("invalid value ") + cfg.nozzle_diameter.serialize());
-            break;
-        }
-
-    // --perimeters
-    if (cfg.wall_loops.value < 0) {
-        error_message.emplace("wall_loops", L("invalid value ") + std::to_string(cfg.wall_loops.value));
-    }
-
-    // --solid-layers
-    if (cfg.top_shell_layers < 0) {
-        error_message.emplace("top_shell_layers", L("invalid value ") + std::to_string(cfg.top_shell_layers));
-    }
-    if (cfg.bottom_shell_layers < 0) {
-        error_message.emplace("bottom_shell_layers", L("invalid value ") + std::to_string(cfg.bottom_shell_layers));
-    }
-
-    if (cfg.use_firmware_retraction.value &&
-        cfg.gcode_flavor.value != gcfKlipper &&
-        cfg.gcode_flavor.value != gcfSmoothie &&
-        cfg.gcode_flavor.value != gcfRepRapSprinter &&
-        cfg.gcode_flavor.value != gcfRepRapFirmware &&
-        cfg.gcode_flavor.value != gcfMarlinLegacy &&
-        cfg.gcode_flavor.value != gcfMarlinFirmware &&
-        cfg.gcode_flavor.value != gcfMachinekit &&
-        cfg.gcode_flavor.value != gcfRepetier)
-        error_message.emplace("use_firmware_retraction","--use-firmware-retraction is only supported by Klipper, Marlin, Smoothie, RepRapFirmware, Repetier and Machinekit firmware");
-
-    if (cfg.use_firmware_retraction.value)
-        for (unsigned char wipe : cfg.wipe.values)
-             if (wipe)
-                error_message.emplace("use_firmware_retraction", "--use-firmware-retraction is not compatible with --wipe");
-                
-    // --gcode-flavor
-    if (! print_config_def.get("gcode_flavor")->has_enum_value(cfg.gcode_flavor.serialize())) {
-        error_message.emplace("gcode_flavor", L("invalid value ") + cfg.gcode_flavor.serialize());
-    }
-
-    // --fill-pattern
-    if (! print_config_def.get("sparse_infill_pattern")->has_enum_value(cfg.sparse_infill_pattern.serialize())) {
-        error_message.emplace("sparse_infill_pattern", L("invalid value ") + cfg.sparse_infill_pattern.serialize());
-    }
-
-    // --top-fill-pattern
-    if (! print_config_def.get("top_surface_pattern")->has_enum_value(cfg.top_surface_pattern.serialize())) {
-        error_message.emplace("top_surface_pattern", L("invalid value ") + cfg.top_surface_pattern.serialize());
-    }
-
-    // --bottom-fill-pattern
-    if (! print_config_def.get("bottom_surface_pattern")->has_enum_value(cfg.bottom_surface_pattern.serialize())) {
-        error_message.emplace("bottom_surface_pattern", L("invalid value ") + cfg.bottom_surface_pattern.serialize());
-    }
-
-    // --soild-fill-pattern
-    if (!print_config_def.get("internal_solid_infill_pattern")->has_enum_value(cfg.internal_solid_infill_pattern.serialize())) {
-        error_message.emplace("internal_solid_infill_pattern", L("invalid value ") + cfg.internal_solid_infill_pattern.serialize());
-    }
-
-    // --skirt-height
-    if (cfg.skirt_height < 0) {
-        error_message.emplace("skirt_height", L("invalid value ") + std::to_string(cfg.skirt_height));
-    }
-
-    // --bridge-flow-ratio
-    if (cfg.bridge_flow <= 0) {
-        error_message.emplace("bridge_flow", L("invalid value ") + std::to_string(cfg.bridge_flow));
-    }
-    
-    // --bridge-flow-ratio
-    if (cfg.bridge_flow <= 0) {
-        error_message.emplace("internal_bridge_flow", L("invalid value ") + std::to_string(cfg.internal_bridge_flow));
-    }
-
-    // extruder clearance
-    if (cfg.extruder_clearance_radius <= 0) {
-        error_message.emplace("extruder_clearance_radius", L("invalid value ") + std::to_string(cfg.extruder_clearance_radius));
-    }
-    if (cfg.extruder_clearance_height_to_rod <= 0) {
-        error_message.emplace("extruder_clearance_height_to_rod", L("invalid value ") + std::to_string(cfg.extruder_clearance_height_to_rod));
-    }
-    if (cfg.extruder_clearance_height_to_lid <= 0) {
-        error_message.emplace("extruder_clearance_height_to_lid", L("invalid value ") + std::to_string(cfg.extruder_clearance_height_to_lid));
-    }
-    if (cfg.nozzle_height <= 0)
-        error_message.emplace("nozzle_height", L("invalid value ") + std::to_string(cfg.nozzle_height));
-
-    // --extrusion-multiplier
-    for (double em : cfg.filament_flow_ratio.values)
-        if (em <= 0) {
-            error_message.emplace("filament_flow_ratio", L("invalid value ") + cfg.filament_flow_ratio.serialize());
-            break;
-        }
-
-    // --spiral-vase
-    //for non-cli case, we will popup dialog for spiral mode correction
-    if (cfg.spiral_mode && under_cli) {
-        // Note that we might want to have more than one perimeter on the bottom
-        // solid layers.
-        if (cfg.wall_loops != 1) {
-            error_message.emplace("wall_loops", L("Invalid value when spiral vase mode is enabled: ") + std::to_string(cfg.wall_loops));
-            //return "Can't make more than one perimeter when spiral vase mode is enabled";
-            //return "Can't make less than one perimeter when spiral vase mode is enabled";
-        }
-
-        if (cfg.sparse_infill_density > 0) {
-            error_message.emplace("sparse_infill_density", L("Invalid value when spiral vase mode is enabled: ") + std::to_string(cfg.sparse_infill_density));
-            //return "Spiral vase mode can only print hollow objects, so you need to set Fill density to 0";
-        }
-
-        if (cfg.top_shell_layers > 0) {
-            error_message.emplace("top_shell_layers", L("Invalid value when spiral vase mode is enabled: ") + std::to_string(cfg.top_shell_layers));
-            //return "Spiral vase mode is not compatible with top solid layers";
-        }
-
-        if (cfg.enable_support ) {
-            error_message.emplace("enable_support", L("Invalid value when spiral vase mode is enabled: ") + std::to_string(cfg.enable_support));
-            //return "Spiral vase mode is not compatible with support";
-        }
-        if (cfg.enforce_support_layers > 0) {
-            error_message.emplace("enforce_support_layers", L("Invalid value when spiral vase mode is enabled: ") + std::to_string(cfg.enforce_support_layers));
-            //return "Spiral vase mode is not compatible with support";
-        }
-    }
-
-    // extrusion widths
-    {
-        double max_nozzle_diameter = 0.;
-        for (double dmr : cfg.nozzle_diameter.values)
-            max_nozzle_diameter = std::max(max_nozzle_diameter, dmr);
-        const char *widths[] = {
-            "outer_wall_line_width",
-            "inner_wall_line_width",
-            "sparse_infill_line_width",
-            "internal_solid_infill_line_width",
-            "top_surface_line_width",
-            "support_line_width",
-            "initial_layer_line_width",
-            "skin_infill_line_width",
-            "skeleton_infill_line_width"};
-        for (size_t i = 0; i < sizeof(widths) / sizeof(widths[i]); ++ i) {
-            std::string key(widths[i]);
-            if (cfg.get_abs_value(key, max_nozzle_diameter) > MAX_LINE_WIDTH_MULTIPLIER * max_nozzle_diameter) {
-                error_message.emplace(key, L("too large line width ") + std::to_string(cfg.get_abs_value(key)));
-                //return std::string("Too Large line width: ") + key;
-            }
-        }
-    }
-
-    // Out of range validation of numeric values.
-    for (const std::string &opt_key : cfg.keys()) {
-        const ConfigOption      *opt    = cfg.optptr(opt_key);
-        assert(opt != nullptr);
-        const ConfigOptionDef   *optdef = print_config_def.get(opt_key);
-        assert(optdef != nullptr);
-        bool out_of_range = false;
-        switch (opt->type()) {
-        case coFloat:
-        case coPercent:
-        case coFloatOrPercent:
-        {
-            auto *fopt = static_cast<const ConfigOptionFloat*>(opt);
-            out_of_range = fopt->value < optdef->min || fopt->value > optdef->max;
-            break;
-        }
-        case coFloats:
-        case coPercents:
-            for (double v : static_cast<const ConfigOptionVector<double>*>(opt)->values)
-                if (v < optdef->min || v > optdef->max) {
-                    out_of_range = true;
-                    break;
-                }
-            break;
-        case coInt:
-        {
-            auto *iopt = static_cast<const ConfigOptionInt*>(opt);
-            out_of_range = iopt->value < optdef->min || iopt->value > optdef->max;
-            break;
-        }
-        case coInts:
-            for (int v : static_cast<const ConfigOptionVector<int>*>(opt)->values)
-                if (v < optdef->min || v > optdef->max) {
-                    out_of_range = true;
-                    break;
-                }
-            break;
-        default:;
-        }
-        if (out_of_range) {
-            if (error_message.find(opt_key) == error_message.end())
-                error_message.emplace(opt_key, opt->serialize() + L(" not in range ") +"[" + std::to_string(optdef->min) + "," + std::to_string(optdef->max) + "]");
-            //return std::string("Value out of range: " + opt_key);
-        }
-    }
-
-    // The configuration is valid.
-    return error_message;
-}
-
-// Declare and initialize static caches of StaticPrintConfig derived classes.
-#define PRINT_CONFIG_CACHE_ELEMENT_DEFINITION(r, data, CLASS_NAME) StaticPrintConfig::StaticCache<class Slic3r::CLASS_NAME> BOOST_PP_CAT(CLASS_NAME::s_cache_, CLASS_NAME);
-#define PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION(r, data, CLASS_NAME) Slic3r::CLASS_NAME::initialize_cache();
-#define PRINT_CONFIG_CACHE_INITIALIZE(CLASSES_SEQ) \
-    BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_DEFINITION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
-    int print_config_static_initializer() { \
-        /* Putting a trace here to avoid the compiler to optimize out this function. */ \
-        BOOST_LOG_TRIVIAL(trace) << "Initializing StaticPrintConfigs"; \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
-        return 1; \
-    }
-PRINT_CONFIG_CACHE_INITIALIZE((
-    PrintObjectConfig, PrintRegionConfig, MachineEnvelopeConfig, GCodeConfig, PrintConfig, FullPrintConfig,
-    SLAMaterialConfig, SLAPrintConfig, SLAPrintObjectConfig, SLAPrinterConfig, SLAFullPrintConfig))
-static int print_config_static_initialized = print_config_static_initializer();
-
-//BBS: remove unused command currently
-CLIActionsConfigDef::CLIActionsConfigDef()
-{
-    ConfigOptionDef* def;
-
-    // Actions:
-    /*def = this->add("export_obj", coBool);
-    def->label = L("Export OBJ");
-    def->tooltip = L("Export the model(s) as OBJ.");
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-/*
-    def = this->add("export_svg", coBool);
-    def->label = L("Export SVG");
-    def->tooltip = L("Slice the model and export solid slices as SVG.");
-    def->set_default_value(new ConfigOptionBool(false));
-*/
-
-    /*def = this->add("export_sla", coBool);
-    def->label = L("Export SLA");
-    def->tooltip = L("Slice the model and export SLA printing layers as PNG.");
-    def->cli = "export-sla|sla";
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    def = this->add("export_3mf", coString);
-    def->label = L("Export 3MF");
-    def->tooltip = L("Export project as 3MF.");
-    def->cli_params = "filename.3mf";
-    def->set_default_value(new ConfigOptionString("output.3mf"));
-
-    def = this->add("export_slicedata", coString);
-    def->label = L("Export slicing data");
-    def->tooltip = L("Export slicing data to a folder.");
-    def->cli_params = "slicing_data_directory";
-    def->set_default_value(new ConfigOptionString("cached_data"));
-
-    def = this->add("load_slicedata", coStrings);
-    def->label = L("Load slicing data");
-    def->tooltip = L("Load cached slicing data from directory.");
-    def->cli_params = "slicing_data_directory";
-    def->set_default_value(new ConfigOptionString("cached_data"));
-
-    /*def = this->add("export_amf", coBool);
-    def->label = L("Export AMF");
-    def->tooltip = L("Export the model(s) as AMF.");
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    def = this->add("export_stl", coBool);
-    def->label = L("Export STL");
-    def->tooltip = L("Export the objects as single STL.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("export_stls", coString);
-    def->label = L("Export multiple STLs");
-    def->tooltip = L("Export the objects as multiple STLs to directory.");
-    def->set_default_value(new ConfigOptionString("stl_path"));
-
-    /*def = this->add("export_gcode", coBool);
-    def->label = L("Export G-code");
-    def->tooltip = L("Slice the model and export toolpaths as G-code.");
-    def->cli = "export-gcode|gcode|g";
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    /*def = this->add("gcodeviewer", coBool);
-    // BBS: remove _L()
-    def->label = L("G-code viewer");
-    def->tooltip = L("Visualize an already sliced and saved G-code.");
-    def->cli = "gcodeviewer";
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    def = this->add("slice", coInt);
-    def->label = L("Slice");
-    def->tooltip = L("Slice the plates: 0-all plates, i-plate i, others-invalid");
-    def->cli = "slice";
-    def->cli_params = "option";
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("help", coBool);
-    def->label = L("Help");
-    def->tooltip = L("Show command help.");
-    def->cli = "help|h";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("uptodate", coBool);
-    def->label = L("UpToDate");
-    def->tooltip = L("Update the configs values of 3mf to latest.");
-    def->cli = "uptodate";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("downward_check", coStrings);
-    def->label = L("downward machines check");
-    def->tooltip = L("check whether current machine downward compatible with the machines in the list.");
-    def->cli_params = "\"machine1.json;machine2.json;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("load_defaultfila", coBool);
-    def->label = L("Load default filaments");
-    def->tooltip = L("Load first filament as default for those not loaded.");
-    def->cli_params = "option";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("min_save", coBool);
-    def->label = L("Minimum save");
-    def->tooltip = L("export 3mf with minimum size.");
-    def->cli_params = "option";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("mtcpp", coInt);
-    def->label = L("mtcpp");
-    def->tooltip = L("max triangle count per plate for slicing.");
-    def->cli = "mtcpp";
-    def->cli_params = "count";
-    def->set_default_value(new ConfigOptionInt(1000000));
-
-    def = this->add("mstpp", coInt);
-    def->label = L("mstpp");
-    def->tooltip = L("max slicing time per plate in seconds.");
-    def->cli = "mstpp";
-    def->cli_params = "time";
-    def->set_default_value(new ConfigOptionInt(300));
-
-    // must define new params here, otherwise comamnd param check will fail
-    def = this->add("no_check", coBool);
-    def->label = L("No check");
-    def->tooltip = L("Do not run any validity checks, such as G-code path conflicts check.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("normative_check", coBool);
-    def->label = L("Normative check");
-    def->tooltip = L("Check the normative items.");
-    def->cli_params = "option";
-    def->set_default_value(new ConfigOptionBool(true));
-
-    /*def = this->add("help_fff", coBool);
-    def->label = L("Help (FFF options)");
-    def->tooltip = L("Show the full list of print/G-code configuration options.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("help_sla", coBool);
-    def->label = L("Help (SLA options)");
-    def->tooltip = L("Show the full list of SLA print configuration options.");
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    def = this->add("info", coBool);
-    def->label = L("Output Model Info");
-    def->tooltip = L("Output the model's information.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("export_settings", coString);
-    def->label = L("Export Settings");
-    def->tooltip = L("Export settings to a file.");
-    def->cli_params = "settings.json";
-    def->set_default_value(new ConfigOptionString("output.json"));
-
-    def = this->add("pipe", coString);
-    def->label = L("Send progress to pipe");
-    def->tooltip = L("Send progress to pipe.");
-    def->cli_params = "pipename";
-    def->set_default_value(new ConfigOptionString());
-}
-
-//BBS: remove unused command currently
-CLITransformConfigDef::CLITransformConfigDef()
-{
-    ConfigOptionDef* def;
-
-    // Transform options:
-    /*def = this->add("align_xy", coPoint);
-    def->label = L("Align XY");
-    def->tooltip = L("Align the model to the given point.");
-    def->set_default_value(new ConfigOptionPoint(Vec2d(100,100)));
-
-    def = this->add("cut", coFloat);
-    def->label = L("Cut");
-    def->tooltip = L("Cut model at the given Z.");
-    def->set_default_value(new ConfigOptionFloat(0));*/
-
-/*
-    def = this->add("cut_grid", coFloat);
-    def->label = L("Cut");
-    def->tooltip = L("Cut model in the XY plane into tiles of the specified max size.");
-    def->set_default_value(new ConfigOptionPoint());
-
-    def = this->add("cut_x", coFloat);
-    def->label = L("Cut");
-    def->tooltip = L("Cut model at the given X.");
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("cut_y", coFloat);
-    def->label = L("Cut");
-    def->tooltip = L("Cut model at the given Y.");
-    def->set_default_value(new ConfigOptionFloat(0));
-*/
-
-    /*def = this->add("center", coPoint);
-    def->label = L("Center");
-    def->tooltip = L("Center the print around the given center.");
-    def->set_default_value(new ConfigOptionPoint(Vec2d(100,100)));*/
-
-    def = this->add("arrange", coInt);
-    def->label = L("Arrange Options");
-    def->tooltip = L("Arrange options: 0-disable, 1-enable, others-auto");
-    def->cli_params = "option";
-    //def->cli = "arrange|a";
-    def->set_default_value(new ConfigOptionInt(0));
-
-    def = this->add("repetitions", coInt);
-    def->label = L("Repetition count");
-    def->tooltip = L("Repetition count of the whole model.");
-    def->cli_params = "count";
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("ensure_on_bed", coBool);
-    def->label = L("Ensure on bed");
-    def->tooltip = L("Lift the object above the bed when it is partially below. Disabled by default.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    /*def = this->add("copy", coInt);
-    def->label = L("Copy");
-    def->tooltip =L("Duplicate copies of model.");
-    def->min = 1;
-    def->set_default_value(new ConfigOptionInt(1));*/
-
-    /*def = this->add("duplicate_grid", coPoint);
-    def->label = L("Duplicate by grid");
-    def->tooltip = L("Multiply copies by creating a grid.");*/
-
-    def = this->add("assemble", coBool);
-    def->label = L("Assemble");
-    def->tooltip = L("Arrange the supplied models in a plate and merge them in a single model in order to perform actions once.");
-    //def->cli = "merge|m";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("convert_unit", coBool);
-    def->label = L("Convert Unit");
-    def->tooltip = L("Convert the units of model.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("orient", coInt);
-    def->label = L("Orient Options");
-    def->tooltip = L("Orient options: 0-disable, 1-enable, others-auto");
-    //def->cli = "orient|o";
-    def->set_default_value(new ConfigOptionInt(0));
-
-    /*def = this->add("repair", coBool);
-    def->label = L("Repair");
-    def->tooltip = L("Repair the model's meshes if it is non-manifold mesh.");
-    def->set_default_value(new ConfigOptionBool(false));*/
-
-    def = this->add("rotate", coFloat);
-    def->label = L("Rotate");
-    def->tooltip = L("Rotation angle around the Z axis in degrees.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("rotate_x", coFloat);
-    def->label = L("Rotate around X");
-    def->tooltip = L("Rotation angle around the X axis in degrees.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("rotate_y", coFloat);
-    def->label = L("Rotate around Y");
-    def->tooltip = L("Rotation angle around the Y axis in degrees.");
-    def->sidetext = "Â°";	// degrees, don't need translation
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("scale", coFloat);
-    def->label = L("Scale");
-    def->tooltip = L("Scale the model by a float factor.");
-    def->cli_params = "factor";
-    def->set_default_value(new ConfigOptionFloat(1.f));
-
-    /*def = this->add("split", coBool);
-    def->label = L("Split");
-    def->tooltip = L("Detect unconnected parts in the given model(s) and split them into separate objects.");
-
-    def = this->add("scale_to_fit", coPoint3);
-    def->label = L("Scale to Fit");
-    def->tooltip = L("Scale to fit the given volume.");
-    def->set_default_value(new ConfigOptionPoint3(Vec3d(0,0,0)));*/
-}
-
-CLIMiscConfigDef::CLIMiscConfigDef()
-{
-    ConfigOptionDef* def;
-
-    /*def = this->add("ignore_nonexistent_config", coBool);
-    def->label = L("Ignore non-existent config files");
-    def->tooltip = L("Do not fail if a file supplied to --load does not exist.");
-
-    def = this->add("config_compatibility", coEnum);
-    def->label = L("Forward-compatibility rule when loading configurations from config files and project files (3MF, AMF).");
-    def->tooltip = L("This version of Snapmaker_Orca may not understand configurations produced by the newest OrcaSlicer versions. "
-                     "For example, newer  may extend the list of supported firmware flavors. One may decide to "
-                     "bail out or to substitute an unknown value with a default silently or verbosely.");
-    def->enum_keys_map = &ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>::get_enum_values();
-    def->enum_values.push_back("disable");
-    def->enum_values.push_back("enable");
-    def->enum_values.push_back("enable_silent");
-    def->enum_labels.push_back(L("Bail out on unknown configuration values"));
-    def->enum_labels.push_back(L("Enable reading unknown configuration values by verbosely substituting them with defaults."));
-    def->enum_labels.push_back(L("Enable reading unknown configuration values by silently substituting them with defaults."));
-    def->set_default_value(new ConfigOptionEnum<ForwardCompatibilitySubstitutionRule>(ForwardCompatibilitySubstitutionRule::Enable));*/
-
-    /*def = this->add("load", coStrings);
-    def->label = L("Load config file");
-    def->tooltip = L("Load configuration from the specified file. It can be used more than once to load options from multiple files.");*/
-
-    def = this->add("load_settings", coStrings);
-    def->label = L("Load General Settings");
-    def->tooltip = L("Load process/machine settings from the specified file.");
-    def->cli_params = "\"setting1.json;setting2.json\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("load_filaments", coStrings);
-    def->label = L("Load Filament Settings");
-    def->tooltip = L("Load filament settings from the specified file list.");
-    def->cli_params = "\"filament1.json;filament2.json;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("skip_objects", coInts);
-    def->label = L("Skip Objects");
-    def->tooltip = L("Skip some objects in this print.");
-    def->cli_params = "\"3,5,10,77\"";
-    def->set_default_value(new ConfigOptionInts());
-
-    def = this->add("clone_objects", coInts);
-    def->label = L("Clone Objects");
-    def->tooltip = L("Clone objects in the load list.");
-    def->cli_params = "\"1,3,1,10\"";
-    def->set_default_value(new ConfigOptionInts());
-
-    def = this->add("uptodate_settings", coStrings);
-    def->label = L("Load uptodate process/machine settings when using uptodate");
-    def->tooltip = L("Load uptodate process/machine settings from the specified file when using uptodate.");
-    def->cli_params = "\"setting1.json;setting2.json\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("uptodate_filaments", coStrings);
-    def->label = L("Load uptodate filament settings when using uptodate");
-    def->tooltip = L("Load uptodate filament settings from the specified file when using uptodate.");
-    def->cli_params = "\"filament1.json;filament2.json;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("downward_check", coBool);
-    def->label = L("Downward machines check");
-    def->tooltip = L("If enabled, check whether current machine downward compatible with the machines in the list.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("downward_settings", coStrings);
-    def->label = L("downward machines settings");
-    def->tooltip = L("The machine settings list needs to do downward checking.");
-    def->cli_params = "\"machine1.json;machine2.json;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("load_assemble_list", coString);
-    def->label = L("Load assemble list");
-    def->tooltip = L("Load assemble object list from config file.");
-    def->cli_params = "assemble_list.json";
-    def->set_default_value(new ConfigOptionString());
-
-    /*def = this->add("output", coString);
-    def->label = L("Output File");
-    def->tooltip = L("The file where the output will be written (if not specified, it will be based on the input file).");
-    def->cli = "output|o";
-
-    def = this->add("single_instance", coBool);
-    def->label = L("Single instance mode");
-    def->tooltip = L("If enabled, the command line arguments are sent to an existing instance of GUI OrcaSlicer, "
-                     "or an existing Snapmaker_Orca window is activated. "
-                     "Overrides the \"single_instance\" configuration value from application preferences.");*/
-
-/*
-    def = this->add("autosave", coString);
-    def->label = L("Autosave");
-    def->tooltip = L("Automatically export current configuration to the specified file.");
-*/
-
-    def = this->add("datadir", coString);
-    def->label = L("Data directory");
-    def->tooltip = L("Load and store settings at the given directory. This is useful for maintaining different profiles or including configurations from a network storage.");
-
-
-    def = this->add("outputdir", coString);
-    def->label = L("Output directory");
-    def->tooltip = L("Output directory for the exported files.");
-    def->cli_params = "dir";
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("debug", coInt);
-    def->label = L("Debug level");
-    def->tooltip = L("Sets debug logging level. 0:fatal, 1:error, 2:warning, 3:info, 4:debug, 5:trace\n");
-    def->min = 0;
-    def->cli_params = "level";
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = this->add("enable_timelapse", coBool);
-    def->label = L("Enable timelapse for print");
-    def->tooltip = L("If enabled, this slicing will be considered using timelapse.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-#if (defined(_MSC_VER) || defined(__MINGW32__)) && defined(SLIC3R_GUI)
-    /*def = this->add("sw_renderer", coBool);
-    def->label = L("Render with a software renderer");
-    def->tooltip = L("Render with a software renderer. The bundled MESA software renderer is loaded instead of the default OpenGL driver.");
-    def->min = 0;*/
-#endif /* _MSC_VER */
-
-    def = this->add("load_custom_gcodes", coString);
-    def->label = L("Load custom G-code");
-    def->tooltip = L("Load custom G-code from json.");
-    def->cli_params = "custom_gcode_toolchange.json";
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("load_filament_ids", coInts);
-    def->label = L("Load filament IDs");
-    def->tooltip = L("Load filament IDs for each object.");
-    def->cli_params = "\"1,2,3,1\"";
-    def->set_default_value(new ConfigOptionInts());
-
-    def = this->add("allow_multicolor_oneplate", coBool);
-    def->label = L("Allow multiple colors on one plate");
-    def->tooltip = L("If enabled, Arrange will allow multiple colors on one plate.");
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("allow_rotations", coBool);
-    def->label = L("Allow rotation when arranging");
-    def->tooltip = L("If enabled, Arrange will allow rotation when placing objects.");
-    def->set_default_value(new ConfigOptionBool(true));
-
-    def = this->add("avoid_extrusion_cali_region", coBool);
-    def->label = L("Avoid extrusion calibrate region when arranging");
-    def->tooltip = L("If enabled, Arrange will avoid extrusion calibrate region when placing objects.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("skip_modified_gcodes", coBool);
-    def->label = L("Skip modified G-code in 3mf");
-    def->tooltip = L("Skip the modified G-code in 3mf from Printer or filament Presets.");
-    def->cli_params = "option";
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("makerlab_name", coString);
-    def->label = L("MakerLab name");
-    def->tooltip = L("MakerLab name to generate this 3mf.");
-    def->cli_params = "name";
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("makerlab_version", coString);
-    def->label = L("MakerLab version");
-    def->tooltip = L("MakerLab version to generate this 3mf.");
-    def->cli_params = "version";
-    def->set_default_value(new ConfigOptionString());
-
-    def = this->add("metadata_name", coStrings);
-    def->label = L("metadata name list");
-    def->tooltip = L("metadata name list added into 3mf.");
-    def->cli_params = "\"name1;name2;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("metadata_value", coStrings);
-    def->label = L("metadata value list");
-    def->tooltip = L("metadata value list added into 3mf.");
-    def->cli_params = "\"value1;value2;...\"";
-    def->set_default_value(new ConfigOptionStrings());
-
-    def = this->add("allow_newer_file", coBool);
-    def->label = L("Allow 3mf with newer version to be sliced");
-    def->tooltip = L("Allow 3mf with newer version to be sliced.");
-    def->cli_params = "option";
-    def->set_default_value(new  ConfigOptionBool(false));
-}
-
-const CLIActionsConfigDef    cli_actions_config_def;
-const CLITransformConfigDef  cli_transform_config_def;
-const CLIMiscConfigDef       cli_misc_config_def;
-
-DynamicPrintAndCLIConfig::PrintAndCLIConfigDef DynamicPrintAndCLIConfig::s_def;
-
-void DynamicPrintAndCLIConfig::handle_legacy(t_config_option_key &opt_key, std::string &value) const
-{
-    if (cli_actions_config_def  .options.find(opt_key) == cli_actions_config_def  .options.end() &&
-        cli_transform_config_def.options.find(opt_key) == cli_transform_config_def.options.end() &&
-        cli_misc_config_def     .options.find(opt_key) == cli_misc_config_def     .options.end()) {
-        PrintConfigDef::handle_legacy(opt_key, value);
-    }
-}
-
-// SlicingStatesConfigDefs
-
-// Create a new config definition with a label and tooltip
-// Note: the L() macro is already used for LABEL and TOOLTIP
-#define new_def(OPT_KEY, TYPE, LABEL, TOOLTIP) \
-        def = this->add(OPT_KEY, TYPE); \
-        def->label = L(LABEL); \
-        def->tooltip = L(TOOLTIP);
-
-ReadOnlySlicingStatesConfigDef::ReadOnlySlicingStatesConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("zhop", coFloat);
-    def->label = L("Current Z-hop");
-    def->tooltip = L("Contains Z-hop present at the beginning of the custom G-code block.");
-}
-
-ReadWriteSlicingStatesConfigDef::ReadWriteSlicingStatesConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("position", coFloats);
-    def->label = L("Position");
-    def->tooltip = L("Position of the extruder at the beginning of the custom G-code block. If the custom G-code travels somewhere else, "
-                     "it should write to this variable so Snapmaker Orca knows where it travels from when it gets control back.");
-
-    def = this->add("e_retracted", coFloats);
-    def->label = L("Retraction");
-    def->tooltip = L("Retraction state at the beginning of the custom G-code block. If the custom G-code moves the extruder axis, "
-                     "it should write to this variable so Snapmaker Orca de-retracts correctly when it gets control back.");
-
-    def = this->add("e_restart_extra", coFloats);
-    def->label = L("Extra de-retraction");
-    def->tooltip = L("Currently planned extra extruder priming after de-retraction.");
-
-   def = this->add("e_position", coFloats);
-   def->label = L("Absolute E position");
-   def->tooltip = L("Current position of the extruder axis. Only used with absolute extruder addressing.");
-}
-
-OtherSlicingStatesConfigDef::OtherSlicingStatesConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("current_extruder", coInt);
-    def->label = L("Current extruder");
-    def->tooltip = L("Zero-based index of currently used extruder.");
-
-    def = this->add("current_object_idx", coInt);
-    def->label = L("Current object index");
-    def->tooltip = L("Specific for sequential printing. Zero-based index of currently printed object.");
-
-    def = this->add("has_wipe_tower", coBool);
-    def->label = L("Has wipe tower");
-    def->tooltip = L("Whether or not wipe tower is being generated in the print.");
-
-    def = this->add("initial_extruder", coInt);
-    def->label = L("Initial extruder");
-    def->tooltip = L("Zero-based index of the first extruder used in the print. Same as initial_tool.");
-
-    def = this->add("initial_tool", coInt);
-    def->label = L("Initial tool");
-    def->tooltip = L("Zero-based index of the first extruder used in the print. Same as initial_extruder.");
-
-    def = this->add("is_extruder_used", coBools);
-    def->label = L("Is extruder used?");
-    def->tooltip = L("Vector of booleans stating whether a given extruder is used in the print.");
-
-    // Options from PS not used in Orca
-    //    def = this->add("initial_filament_type", coString);
-    //    def->label = L("Initial filament type");
-    //    def->tooltip = L("String containing filament type of the first used extruder.");
-
-    def          = this->add("has_single_extruder_multi_material_priming", coBool);
-    def->label   = L("Has single extruder MM priming");
-    def->tooltip = L("Are the extra multi-material priming regions used in this print?");
-
-    new_def("initial_no_support_extruder", coInt, "Initial no support extruder", "Zero-based index of the first extruder used for printing without support. Same as initial_no_support_tool.");
-    new_def("in_head_wrap_detect_zone", coBool, "In head wrap detect zone", "Indicates if the first layer overlaps with the head wrap zone.");
-}
-
-PrintStatisticsConfigDef::PrintStatisticsConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("extruded_volume", coFloats);
-    def->label = L("Volume per extruder");
-    def->tooltip = L("Total filament volume extruded per extruder during the entire print.");
-
-    def = this->add("total_toolchanges", coInt);
-    def->label = L("Total tool changes");
-    def->tooltip = L("Number of tool changes during the print.");
-
-    def = this->add("extruded_volume_total", coFloat);
-    def->label = L("Total volume");
-    def->tooltip = L("Total volume of filament used during the entire print.");
-
-    def = this->add("extruded_weight", coFloats);
-    def->label = L("Weight per extruder");
-    def->tooltip = L("Weight per extruder extruded during the entire print. Calculated from filament_density value in Filament Settings.");
-
-    def = this->add("extruded_weight_total", coFloat);
-    def->label = L("Total weight");
-    def->tooltip = L("Total weight of the print. Calculated from filament_density value in Filament Settings.");
-
-    def = this->add("total_layer_count", coInt);
-    def->label = L("Total layer count");
-    def->tooltip = L("Number of layers in the entire print.");
-
-    // Options from PS not used in Orca
-    /*    def = this->add("normal_print_time", coString);
-    def->label = L("Print time (normal mode)");
-    def->tooltip = L("Estimated print time when printed in normal mode (i.e. not in silent mode). Same as print_time.");
-
-    def = this->add("num_printing_extruders", coInt);
-    def->label = L("Number of printing extruders");
-    def->tooltip = L("Number of extruders used during the print.");
-
-    def = this->add("print_time", coString);
-    def->label = L("Print time (normal mode)");
-    def->tooltip = L("Estimated print time when printed in normal mode (i.e. not in silent mode). Same as normal_print_time.");
-
-    def = this->add("printing_filament_types", coString);
-    def->label = L("Used filament types");
-    def->tooltip = L("Comma-separated list of all filament types used during the print.");
-
-    def = this->add("silent_print_time", coString);
-    def->label = L("Print time (silent mode)");
-    def->tooltip = L("Estimated print time when printed in silent mode.");
-
-    def = this->add("total_cost", coFloat);
-    def->label = L("Total cost");
-    def->tooltip = L("Total cost of all material used in the print. Calculated from filament_cost value in Filament Settings.");
-
-    def = this->add("total_weight", coFloat);
-    def->label = L("Total weight");
-    def->tooltip = L("Total weight of the print. Calculated from filament_density value in Filament Settings.");
-
-    def = this->add("total_wipe_tower_cost", coFloat);
-    def->label = L("Total wipe tower cost");
-    def->tooltip = L("Total cost of the material wasted on the wipe tower. Calculated from filament_cost value in Filament Settings.");
-
-    def = this->add("total_wipe_tower_filament", coFloat);
-    def->label = L("Wipe tower volume");
-    def->tooltip = L("Total filament volume extruded on the wipe tower.");
-
-    def = this->add("used_filament", coFloat);
-    def->label = L("Used filament");
-    def->tooltip = L("Total length of filament used in the print.");*/
-}
-
-ObjectsInfoConfigDef::ObjectsInfoConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("num_objects", coInt);
-    def->label = L("Number of objects");
-    def->tooltip = L("Total number of objects in the print.");
-
-    def = this->add("num_instances", coInt);
-    def->label = L("Number of instances");
-    def->tooltip = L("Total number of object instances in the print, summed over all objects.");
-
-    def = this->add("scale", coStrings);
-    def->label = L("Scale per object");
-    def->tooltip = L("Contains a string with the information about what scaling was applied to the individual objects. "
-                     "Indexing of the objects is zero-based (first object has index 0).\n"
-                     "Example: 'x:100% y:50% z:100'.");
-
-    def = this->add("input_filename_base", coString);
-    def->label = L("Input filename without extension");
-    def->tooltip = L("Source filename of the first object, without extension.");
-
-    new_def("input_filename", coString, "Full input filename", "Source filename of the first object.");
-    new_def("plate_name", coString, "Plate name", "Name of the plate sliced.");
-}
-
-DimensionsConfigDef::DimensionsConfigDef()
-{
-    ConfigOptionDef* def;
-
-    const std::string point_tooltip   = L("The vector has two elements: x and y coordinate of the point. Values in mm.");
-    const std::string bb_size_tooltip = L("The vector has two elements: x and y dimension of the bounding box. Values in mm.");
-
-    def = this->add("first_layer_print_convex_hull", coPoints);
-    def->label = L("First layer convex hull");
-    def->tooltip = L("Vector of points of the first layer convex hull. Each element has the following format:"
-                     "'[x, y]' (x and y are floating-point numbers in mm).");
-
-    def = this->add("first_layer_print_min", coFloats);
-    def->label = L("Bottom-left corner of first layer bounding box");
-    def->tooltip = point_tooltip;
-
-    def = this->add("first_layer_print_max", coFloats);
-    def->label = L("Top-right corner of first layer bounding box");
-    def->tooltip = point_tooltip;
-
-    def = this->add("first_layer_print_size", coFloats);
-    def->label = L("Size of the first layer bounding box");
-    def->tooltip = bb_size_tooltip;
-
-    def = this->add("print_bed_min", coFloats);
-    def->label = L("Bottom-left corner of print bed bounding box");
-    def->tooltip = point_tooltip;
-
-    def = this->add("print_bed_max", coFloats);
-    def->label = L("Top-right corner of print bed bounding box");
-    def->tooltip = point_tooltip;
-
-    def = this->add("print_bed_size", coFloats);
-    def->label = L("Size of the print bed bounding box");
-    def->tooltip = bb_size_tooltip;
-
-    new_def("first_layer_center_no_wipe_tower", coFloats, "First layer center without wipe tower", point_tooltip);
-    new_def("first_layer_height", coFloat, "First layer height", "Height of the first layer.");
-}
-
-TemperaturesConfigDef::TemperaturesConfigDef()
-{
-    ConfigOptionDef* def;
-
-    new_def("bed_temperature", coInts, "Bed temperature", "Vector of bed temperatures for each extruder/filament.")
-    new_def("bed_temperature_initial_layer", coInts, "Initial layer bed temperature", "Vector of initial layer bed temperatures for each extruder/filament. Provides the same value as first_layer_bed_temperature.")
-    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of used filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over all used extruders/filaments.")
-    new_def("chamber_temperature", coInts, "Chamber temperature", "Vector of chamber temperatures for each extruder/filament.")
-    new_def("overall_chamber_temperature", coInt, "Overall chamber temperature", "Overall chamber temperature. This value is the maximum chamber temperature of any extruder/filament used.")
-    new_def("first_layer_bed_temperature", coInts, "First layer bed temperature", "Vector of first layer bed temperatures for each extruder/filament. Provides the same value as bed_temperature_initial_layer.")
-    new_def("first_layer_temperature", coInts, "First layer temperature", "Vector of first layer temperatures for each extruder/filament.")
-}
-
-
-TimestampsConfigDef::TimestampsConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("timestamp", coString);
-    def->label = L("Timestamp");
-    def->tooltip = L("String containing current time in yyyyMMdd-hhmmss format.");
-
-    def = this->add("year", coInt);
-    def->label = L("Year");
-
-    def = this->add("month", coInt);
-    def->label = L("Month");
-
-    def = this->add("day", coInt);
-    def->label = L("Day");
-
-    def = this->add("hour", coInt);
-    def->label = L("Hour");
-
-    def = this->add("minute", coInt);
-    def->label = L("Minute");
-
-    def = this->add("second", coInt);
-    def->label = L("Second");
-}
-
-OtherPresetsConfigDef::OtherPresetsConfigDef()
-{
-    ConfigOptionDef* def;
-
-    def = this->add("print_preset", coString);
-    def->label = L("Print preset name");
-    def->tooltip = L("Name of the print preset used for slicing.");
-
-    def = this->add("filament_preset", coString);
-    def->label = L("Filament preset name");
-    def->tooltip = L("Names of the filament presets used for slicing. The variable is a vector "
-                     "containing one name for each extruder.");
-
-    def = this->add("printer_preset", coString);
-    def->label = L("Printer preset name");
-    def->tooltip = L("Name of the printer preset used for slicing.");
-
-    def = this->add("physical_printer_preset", coString);
-    def->label = L("Physical printer name");
-    def->tooltip = L("Name of the physical printer used for slicing.");
-
-    def          = this->add("num_extruders", coInt);
-    def->label   = L("Number of extruders");
-    def->tooltip = L("Total number of extruders, regardless of whether they are used in the current print.");
-}
-
-
-static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificPlaceholders{
-    // Machine G-code
-    {"machine_start_gcode",         {}},
-    {"machine_end_gcode",           {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
-    {"before_layer_change_gcode",   {"layer_num", "layer_z", "max_layer_z"}},
-    {"layer_change_gcode",          {"layer_num", "layer_z", "max_layer_z"}},
-    {"timelapse_gcode",             {"layer_num", "layer_z", "max_layer_z"}},
-    {"change_filament_gcode",       {"layer_num", "layer_z", "max_layer_z", "next_extruder", "previous_extruder", "fan_speed",
-                               "first_flush_volume", "flush_length_1", "flush_length_2", "flush_length_3", "flush_length_4",
-                               "new_filament_e_feedrate", "new_filament_temp", "new_retract_length",
-                               "new_retract_length_toolchange", "old_filament_e_feedrate", "old_filament_temp", "old_retract_length",
-                               "old_retract_length_toolchange", "relative_e_axis", "second_flush_volume", "toolchange_count", "toolchange_z",
-                               "travel_point_1_x", "travel_point_1_y", "travel_point_2_x", "travel_point_2_y", "travel_point_3_x",
-                               "travel_point_3_y", "x_after_toolchange", "y_after_toolchange", "z_after_toolchange", "next_wipe_x", "next_wipe_y"}},
-    {"change_extrusion_role_gcode", {"layer_num", "layer_z", "extrusion_role", "last_extrusion_role"}},
-    {"printing_by_object_gcode",    {}},
-    {"machine_pause_gcode",         {}},
-    {"template_custom_gcode",       {}},
-    // Filament G-code
-    {"filament_start_gcode",        {"filament_extruder_id"}},
-    {"filament_end_gcode",          {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
-};
-
-const std::map<t_custom_gcode_key, t_config_option_keys>& custom_gcode_specific_placeholders()
-{
-    return s_CustomGcodeSpecificPlaceholders;
-}
-
-CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
-{
-    ConfigOptionDef* def;
-
-// Common Defs
-    def = this->add("layer_num", coInt);
-    def->label = L("Layer number");
-    def->tooltip = L("Index of the current layer. One-based (i.e. first layer is number 1).");
-
-    def = this->add("layer_z", coFloat);
-    def->label = L("Layer Z");
-    def->tooltip = L("Height of the current layer above the print bed, measured to the top of the layer.");
-
-    def = this->add("max_layer_z", coFloat);
-    def->label = L("Maximal layer Z");
-    def->tooltip = L("Height of the last layer above the print bed.");
-
-    def = this->add("filament_extruder_id", coInt);
-    def->label = L("Filament extruder ID");
-    def->tooltip = L("The current extruder ID. The same as current_extruder.");
-
-// change_filament_gcode
-    new_def("previous_extruder", coInt, "Previous extruder", "Index of the extruder that is being unloaded. The index is zero based (first extruder has index 0).");
-    new_def("next_extruder", coInt, "Next extruder", "Index of the extruder that is being loaded. The index is zero based (first extruder has index 0).");
-    new_def("relative_e_axis", coBool, "Relative e-axis", "Indicates if relative positioning is being used.");
-    new_def("toolchange_count", coInt, "Toolchange count", "The number of toolchanges throught the print.");
-    new_def("fan_speed", coNone, "", ""); //Option is no longer used and is zeroed by placeholder parser for compatability
-    new_def("old_retract_length", coFloat, "Old retract length", "The retraction length of the previous filament");
-    new_def("new_retract_length", coFloat, "New retract length", "The retraction lenght of the new filament");
-    new_def("old_retract_length_toolchange", coFloat, "Old retract length toolchange", "The toolchange retraction length of the previous filament");
-    new_def("new_retract_length_toolchange", coFloat, "New retract length toolchange", "The toolchange retraction length of the new filament");
-    new_def("old_filament_temp", coInt, "Old filament temp", "The old filament temp");
-    new_def("new_filament_temp", coInt, "New filament temp", "The new filament temp");
-    new_def("x_after_toolchange", coFloat, "X after toolchange", "The x pos after toolchange");
-    new_def("y_after_toolchange", coFloat, "Y after toolchange", "The y pos after toolchange");
-    new_def("z_after_toolchange", coFloat, "Z after toolchange", "The z pos after toolchange");
-    new_def("first_flush_volume", coFloat, "First flush volume", "The first flush volume");
-    new_def("second_flush_volume", coFloat, "Second flush volume", "The second flush volume");
-    new_def("old_filament_e_feedrate", coInt, "Old filament e feedrate", "The old filament extruder feedrate");
-    new_def("new_filament_e_feedrate", coInt, "New filament e feedrate", "The new filament extruder feedrate");
-    new_def("travel_point_1_x", coFloat, "Travel point 1 x", "The travel point 1 x");
-    new_def("travel_point_1_y", coFloat, "Travel point 1 y", "The travel point 1 y");
-    new_def("travel_point_2_x", coFloat, "Travel point 2 x", "The travel point 2 x");
-    new_def("travel_point_2_y", coFloat, "Travel point 2 y", "The travel point 2 y");
-    new_def("travel_point_3_x", coFloat, "Travel point 3 x", "The travel point 3 x");
-    new_def("travel_point_3_y", coFloat, "Travel point 3 y", "The travel point 3 y");
-    new_def("flush_length_1", coFloat, "Flush Length 1", "The first flush length");
-    new_def("flush_length_2", coFloat, "Flush Length 2", "The second flush length");
-    new_def("flush_length_3", coFloat, "Flush Length 3", "The third flush length");
-    new_def("flush_length_4", coFloat, "Flush Length 4", "The fourth flush length");
-    new_def("next_wipe_x", coFloat, "Next Wipe X", "For Snapmaker Artision, next x after toolchange");
-    new_def("next_wipe_y", coFloat, "Next Wipe Y", "For Snapmaker Artision, next y after toolchange");
-
-// change_extrusion_role_gcode
-    std::string extrusion_role_types = "Possible Values:\n[\"Perimeter\", \"ExternalPerimeter\", "
-                                                     "\"OverhangPerimeter\", \"InternalInfill\", \"SolidInfill\", \"TopSolidInfill\", \"BottomSurface\", \"BridgeInfill\", \"GapFill\", \"Ironing\", "
-                                                     "\"Skirt\", \"Brim\", \"SupportMaterial\", \"SupportMaterialInterface\", \"SupportTransition\", \"WipeTower\", \"Mixed\"]";
-
-    new_def("extrusion_role", coString, "Extrusion role", "The new extrusion role/type that is going to be used\n" + extrusion_role_types);
-    new_def("last_extrusion_role", coString, "Last extrusion role", "The previously used extrusion role/type\nPossible Values:\n" + extrusion_role_types);
-}
-
-const CustomGcodeSpecificConfigDef custom_gcode_specific_config_def;
-
-#undef new_def
-
-uint64_t ModelConfig::s_last_timestamp = 1;
-
-static Points to_points(const std::vector<Vec2d> &dpts)
-{
-    Points pts; pts.reserve(dpts.size());
-    for (auto &v : dpts)
-        pts.emplace_back( coord_t(scale_(v.x())), coord_t(scale_(v.y())) );
-    return pts;
-}
-
-Points get_bed_shape(const DynamicPrintConfig &config)
-{
-    const auto *bed_shape_opt = config.opt<ConfigOptionPoints>("printable_area");
-    if (!bed_shape_opt) {
-
-        // Here, it is certain that the bed shape is missing, so an infinite one
-        // has to be used, but still, the center of bed can be queried
-        if (auto center_opt = config.opt<ConfigOptionPoint>("center"))
-            return { scaled(center_opt->value) };
-
-        return {};
-    }
-
-    return to_points(make_counter_clockwise(bed_shape_opt->values));
-}
-
-Points get_bed_shape(const PrintConfig &cfg)
-{
-    return to_points(make_counter_clockwise(cfg.printable_area.values));
-}
-
-Points get_bed_shape(const SLAPrinterConfig &cfg) { return to_points(make_counter_clockwise(cfg.printable_area.values)); }
-
-Polygons get_bed_excluded_area(const PrintConfig& cfg)
-{
-    const Pointfs exclude_area_points = cfg.bed_exclude_area.values;
-
-    Polygon exclude_poly;
-    for (int i = 0; i < exclude_area_points.size(); i++) {
-        auto pt = exclude_area_points[i];
-        exclude_poly.points.emplace_back(scale_(pt.x()), scale_(pt.y()));
-    }
-
-    exclude_poly.make_counter_clockwise();
-
-    return {exclude_poly};
-}
-
-Polygon get_bed_shape_with_excluded_area(const PrintConfig& cfg)
-{
-    Polygon bed_poly;
-    bed_poly.points = get_bed_shape(cfg);
-
-    Polygons exclude_polys = get_bed_excluded_area(cfg);
-    auto tmp = diff({ bed_poly }, exclude_polys);
-    if (!tmp.empty()) bed_poly = tmp[0];
-    return bed_poly;
-}
-bool has_skirt(const DynamicPrintConfig& cfg)
-{
-    auto opt_skirt_height = cfg.option("skirt_height");
-    auto opt_skirt_loops = cfg.option("skirt_loops");
-    auto opt_draft_shield = cfg.option("draft_shield");
-    return (opt_skirt_height && opt_skirt_height->getInt() > 0 && opt_skirt_loops && opt_skirt_loops->getInt() > 0)
-        || (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled);
-}
-float get_real_skirt_dist(const DynamicPrintConfig& cfg) {
-    return has_skirt(cfg) ? cfg.opt_float("skirt_distance") : 0;
-}
-static bool is_XL_printer(const std::string& printer_notes)
-{
-    return boost::algorithm::contains(printer_notes, "PRINTER_VENDOR_PRUSA3D")
-        && boost::algorithm::contains(printer_notes, "PRINTER_MODEL_XL");
-}
-
-bool is_XL_printer(const DynamicPrintConfig &cfg)
-{
-    auto *printer_notes = cfg.opt<ConfigOptionString>("printer_notes");
-    return printer_notes && is_XL_printer(printer_notes->value);
-}
-
-bool is_XL_printer(const PrintConfig &cfg)
-{
-    return is_XL_printer(cfg.printer_notes.value);
-}
-} // namespace Slic3r
-
-#include <cereal/types/polymorphic.hpp>
-CEREAL_REGISTER_TYPE(Slic3r::DynamicPrintConfig)
-CEREAL_REGISTER_POLYMORPHIC_RELATION(Slic3r::DynamicConfig, Slic3r::DynamicPrintConfig)
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×ú×¤èµ©hºÚn¶X§zÍHÚ[˜ÛYH”š[ÛÛ™šYËš‚ˆÚ[˜ÛYHÛ\\•][Ëš‚ˆÚ[˜ÛYHÛÛ™šYËš‚ˆÚ[˜ÛYH’LN‹š‚ˆÚ[˜ÛYH™›Ü›X]š‚‚ˆÚ[˜ÛYH‘ÐÛÙKÕ[X›˜Z[Ëš‚ˆÚ[˜ÛYHÙ]‚ˆÚ[˜ÛYH›ÛÜÝØ[ÛÜš]KÜÝš[™ËÜ™\XÙKš‚ˆÚ[˜ÛYH›ÛÜÝØ[ÛÜš]KÜÝš[™ËØØ\ÙWØÛÛ‹š‚ˆÚ[˜ÛYH›ÛÜÝÙ›Ü›X]š‚ˆÚ[˜ÛYH›ÛÜÝÛ^XØ[ØØ\Ýš‚ˆÚ[˜ÛYH›ÛÜÝÛÙËÝš]šX[š‚ˆÚ[˜ÛYH›ÛÜÝÝ™XYš‚ˆÚ[˜ÛYH›Ø]š‚‚›˜[Y\ÜXÙHÂœÝŽœÙ]ÝŽœÝš[™ÏˆÜ]Ýš[™Ð[™™[[Ý™Q\XØ]Q[[Y[
+ÛÛœÝÝŽœÝš[™È	œÝ‹ÛÛœÝÝŽœÝš[™È	œÙ\\˜]ÜŠBžÂˆÝŽœÙ]ÝŽœÝš[™Ïˆ™\Ý[ÂˆYˆ
+Ý‹™[\J
+JH™]\›ˆ™\Ý[Â‚ˆÝŽœÝš[™ÈÝœÈHÝˆ
+ÈÙ\\˜]ÜŽÂˆÚ^™WÝÜÎÂˆÚ^™WÝÚ^™HHÝœËœÚ^™J
+NÂ‚ˆ›Üˆ
+[HHÈHÚ^™NÈ
+ÊÚJHÂˆÜÈHÝœË™š[™
+Ù\\˜]Ü‹JNÂˆYˆ
+ÜÈÚ^™JHÂˆÝŽœÝš[™ÈÝX—ÜÝˆHÝœËœÝXœÝŠKÜÈHJNÂˆ™\Ý[š[œÙ\
+ÝX—ÜÝŠNÂˆHHÜÈ
+ÈÙ\\˜]Ü‹œÚ^™J
+HHNÂˆBˆB‚ˆ™]\›ˆ™\Ý[ÂŸB‚›ÚY™\XÙTÝš[™ÊÝŽœÝš[™È	œ™\ÛÝ\˜ÙWÜÝ‹ÛÛœÝÝŽœÝš[™È	›ÛÜÝ‹ÛÛœÝÝŽœÝš[™È	›™]×ÜÝŠBžÂˆÝŽœÝš[™ÎŽœÚ^™WÝ\HÜÈHÂˆÚ[H
+
+ÜÈH™\ÛÝ\˜ÙWÜÝ‹™š[™
+ÛÜÝ‹ÜÊJHOHÝŽœÝš[™ÎŽ›œÜÊHÂˆ™\ÛÝ\˜ÙWÜÝ‹œ™\XÙJÜËÛÜÝ‹›[™Ý
+
+K™]×ÜÝŠNÂˆÜÈ
+ÏH™]×ÜÝ‹›[™Ý
+
+NÈËØY˜[˜ÙHÜÚ][ÛˆÈÛÛ[YHY\ˆ™\XÙ[Y[ˆBŸBŸB‚›˜[Y\ÜXÙHÛXÌÜˆÂ‚‹ËÈHXXÜ›È\ÙYÈX\šÈÝš[™È\ÙY]ØØ[^˜][Û‹‹ËÈH™]\›ˆØ[YHÝš[™ÂˆÙYš[™H
+ÊH
+ÊBˆÙYš[™HÊÊHÛXÌÜŽŽ’LNŽŽ˜[œÛ]JÊB‚œÝ]XÈØÛÛ™šY×Ù[[WÛ˜[Y\È[[WÛ˜[Y\×Ùœ›ÛWÚÙ^\×ÛX\
+ÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È	™[[WÚÙ^\×ÛX\
+BžÂˆØÛÛ™šY×Ù[[WÛ˜[Y\È˜[Y\ÎÂˆ[ÛHÂˆ›Üˆ
+ÛÛœÝ]]ÉˆÝœˆ[[WÚÙ^\×ÛX\
+BˆÛHÝŽ›X^
+ÛÝœœÙXÛÛ™
+NÂˆÛ
+ÏHNÂˆ˜[Y\Ë˜\ÜÚYÛŠÛˆŠNÂˆ›Üˆ
+ÛÛœÝ]]ÉˆÝœˆ[[WÚÙ^\×ÛX\
+Bˆ˜[Y\ÖÚÝœœÙXÛÛ™HHÝœ™š\œÝÂˆ™]\›ˆ˜[Y\ÎÂŸB‚ˆÙYš[™HÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊSQJHˆÝ]XÈØÛÛ™šY×Ù[[WÛ˜[Y\È×ÚÙ^\×Û˜[Y\×ÈÈÓSQHH[[WÛ˜[Y\×Ùœ›ÛWÚÙ^\×ÛX\
+×ÚÙ^\×ÛX\ÈÈÓSQJNÈˆ[\]OˆÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\ÉˆÛÛ™šYÓÜ[Û‘[[OSQOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+HÈ™]\›ˆ×ÚÙ^\×ÛX\ÈÈÓSQNÈHˆ[\]OˆÛÛœÝØÛÛ™šY×Ù[[WÛ˜[Y\ÉˆÛÛ™šYÓÜ[Û‘[[OSQOŽŽ™Ù]Ù[[WÛ˜[Y\Ê
+HÈ™]\›ˆ×ÚÙ^\×Û˜[Y\×ÈÈÓSQNÈB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ôš[\•XÚ›ÛÙÞHÂˆÈ‘‘‘ˆ‹‘‘ˆKˆÈ”ÓH‹ÓHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊš[\•XÚ›ÛÙÞJB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ôš[ÜÝ\HÂˆÈœ\Ø[[šÈ‹\ØS[šÈKˆÈœ\ØXÛÛ›™XÝ‹\ØPÛÛ›™XÝKˆÈ›ØÝÜš[‹ØÝÔš[KˆÈ˜Ü™X[]\š[‹Ü™X[]Tš[KˆÈ™Y]‹Y]KˆÈ™›\ÚZ\ˆ‹›\ÚZ\ˆKˆÈ˜\Ý›Ø›Þ‹\Ý›Ð›ÞKˆÈœ™\]Y\ˆ‹™\]Y\ˆKˆÈ›ZÜÈ‹RÔÈKˆÈ™\ÜÙ‹TÔÑKˆÈ›ØšXÛÈ‹ØšXÛÈKˆÈ™›\Ú›Ü™ÙH‹›\Ú›Ü™ÙHKˆÈœÚ[\\š[‹Ú[\Tš[KˆÈ™[YÛÛÛ[šÈ‹[YÛÛÓ[šÈBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊš[ÜÝ\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ð]]Üš^˜][Û•\HÂˆÈšÙ^H‹]Ù^T\ÜÝÛÜ™KˆÈ\Ù\ˆ‹]\Ù\”\ÜÝÛÜ™BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ]]Üš^˜][Û•\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÑÐÛÙQ›]›ÜˆÂˆÈ›X\›[ˆ‹ØÙ“X\›[“YØXÞHKˆÈœ™\˜\‹ØÙ”™\˜\Üš[\ˆKˆÈœ™\˜\š\›]Ø\™H‹ØÙ”™\˜\š\›]Ø\™HKˆÈœ™\]Y\ˆ‹ØÙ”™\]Y\ˆKˆÈXXÝ\‹ØÙ•XXÝ\KˆÈ›XZÙ\Ø\™H‹ØÙ“XZÙ\•Ø\™HKˆÈ›X\›[Œˆ‹ØÙ“X\›[‘š\›]Ø\™HKˆÈœØZ[š\Ú‹ØÙ”ØZ[š\ÚKˆÈšÛ\\ˆ‹ØÙ’Û\\ˆKˆÈœÛ[ÛÝYH‹ØÙ”Û[ÛÝYHKˆÈ›XXÚÈ‹ØÙ“XXÚÈKˆÈ›XXÚ[™ZÚ]‹ØÙ“XXÚ[™ZÚ]KˆÈ››ËY^\Ú[Ûˆ‹ØÙ“›Ñ^\Ú[ÛˆBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÐÛÙQ›]›ÜŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ^žžTÚÚ[•\HÂˆÈ››Û™H‹[
+^žžTÚÚ[•\NŽ“›Û™JHKˆÈ™^\›˜[‹[
+^žžTÚÚ[•\NŽ‘^\›˜[
+HKˆÈ˜[‹[
+^žžTÚÚ[•\NŽ[
+HKˆÈ˜[Ø[È‹[
+^žžTÚÚ[•\NŽ[Ø[Ê_BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ^žžTÚÚ[•\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ó›Ú\ÙU\HÂˆÈ˜Û\ÜÚXÈ‹[
+›Ú\ÙU\NŽÛ\ÜÚXÊHKˆÈœ\›[ˆ‹[
+›Ú\ÙU\NŽ”\›[ŠHKˆÈ˜š[ÝÈ‹[
+›Ú\ÙU\NŽš[ÝÊHKˆÈœšYÙY][H‹[
+›Ú\ÙU\NŽ”šYÙY][JHKˆÈ›Ü›Û›ÚH‹[
+›Ú\ÙU\NŽ•›Ü›Û›ÚJHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ›Ú\ÙU\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ^žžTÚÚ[“[ÙHÂˆÈ™\ÜXÙ[Y[‹[
+^žžTÚÚ[“[ÙNŽ‘\ÜXÙ[Y[
+HKˆÈ™^\Ú[Ûˆ‹[
+^žžTÚÚ[“[ÙNŽ‘^\Ú[ÛŠHKˆÈ˜ÛÛXš[™Y‹[
+^žžTÚÚ[“[ÙNŽÛÛXš[™Y
+_BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ^žžTÚÚ[“[ÙJB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ò[™š[]\›ˆÂˆÈ›[Û›ÝÛšXÈ‹\[Û›ÝÛšXÈKˆÈ›[Û›ÝÛšXÛ[™H‹\[Û›ÝÛšXÓ[™HKˆÈœ™XÝ[[™X\ˆ‹\™XÝ[[™X\ˆKˆÈ˜[YÛ™Y™XÝ[[™X\ˆ‹\[YÛ™Y™XÝ[[™X\ˆKˆÈžšYÞ˜YÈ‹\šYÖ˜YÈKˆÈ˜Ü›ÜÜÞ˜YÈ‹\Ü›ÜÜÖ˜YÈKˆÈ›ØÚÙY˜YÈ‹\ØÚÙY˜YÈKˆÈ›[™H‹\[™HKˆÈ™ÜšY‹\ÜšYKˆÈšX[™Û\È‹\šX[™Û\ÈKˆÈšKZ^YÛÛˆ‹\Ý\œÈKˆÈ˜ÝXšXÈ‹\ÝXšXÈKˆÈ˜Y\]™XÝXšXÈ‹\Y\]™PÝXšXÈKˆÈœ]X\\˜ÝXšXÈ‹\]X\\ÝXšXÈKˆÈœÝ\ÜÝXšXÈ‹\Ý\ÜÝXšXÈKˆÈ›YÚš[™È‹\YÚš[™ÈKˆÈšÛ™^XÛÛXˆ‹\Û™^XÛÛXˆKˆÈŒÙÛ™^XÛÛXˆ‹\ÑÛ™^XÛÛXˆKˆÈ›]\˜[ZÛ™^XÛÛXˆ‹\]\˜[Û™^XÛÛXˆKˆÈ›]\˜[[]XÙH‹\]\˜[]XÙHKˆÈ˜Ü›ÜÜÚ]Ú‹\Ü›ÜÜÒ]ÚKˆÈ\Ù‹\\ÑKˆÈ\ÙšÈ‹\\Ñ’ÈKˆÈ™Þ\›ÚY‹\Þ\›ÚYKˆÈ˜ÛÛ˜Ù[šXÈ‹\ÛÛ˜Ù[šXÈKˆÈš[™\Ý\™H‹\[™\Ý\™HKˆÈ˜\˜Ú[YYX[˜ÚÜ™È‹\\˜Ú[YYX[ÚÜ™ÈKˆÈ›ØÝYÜ˜[\Ü\˜[‹\ØÝYÜ˜[TÜ\˜[BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ[™š[]\›ŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ò\›Ûš[™Õ\HÂˆÈ››È\›Ûš[™È‹[
+\›Ûš[™Õ\NŽ“›Ò\›Ûš[™ÊHKˆÈÜ‹[
+\›Ûš[™Õ\NŽ•ÜÝ\™˜XÙ\ÊHKˆÈÜ[ÜÝ‹[
+\›Ûš[™Õ\NŽ•Ü[ÜÝÛ›JHKˆÈœÛÛY‹[
+\›Ûš[™Õ\NŽ[ÛÛY
+HBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ\›Ûš[™Õ\JB‚‹ËÐ”ÂœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÕØ[[™š[Ü™\ˆÂˆÈš[›™\ˆØ[ÛÝ]\ˆØ[Ú[™š[‹[
+Ø[[™š[Ü™\ŽŽ’[›™\“Ý]\’[™š[
+HKˆÈ›Ý]\ˆØ[Ú[›™\ˆØ[Ú[™š[‹[
+Ø[[™š[Ü™\ŽŽ“Ý]\’[›™\’[™š[
+HKˆÈš[›™\‹[Ý]\‹Z[›™\ˆØ[Ú[™š[‹[
+Ø[[™š[Ü™\ŽŽ’[›™\“Ý]\’[›™\’[™š[
+HKˆÈš[™š[Ú[›™\ˆØ[ÛÝ]\ˆØ[‹[
+Ø[[™š[Ü™\ŽŽ’[™š[[›™\“Ý]\ŠHKˆÈš[™š[ÛÝ]\ˆØ[Ú[›™\ˆØ[‹[
+Ø[[™š[Ü™\ŽŽ’[™š[Ý]\’[›™\ŠHKˆÈš[›™\‹[Ý]\‹Z[›™\ˆØ[Ú[™š[‹[
+Ø[[™š[Ü™\ŽŽ’[›™\“Ý]\’[›™\’[™š[
+_BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊØ[[™š[Ü™\ŠB‚‹ËÐ”ÂœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÕØ[Ù\]Y[˜ÙHÂˆÈš[›™\ˆØ[ÛÝ]\ˆØ[‹[
+Ø[Ù\]Y[˜ÙNŽ’[›™\“Ý]\ŠHKˆÈ›Ý]\ˆØ[Ú[›™\ˆØ[‹[
+Ø[Ù\]Y[˜ÙNŽ“Ý]\’[›™\ŠHKˆÈš[›™\‹[Ý]\‹Z[›™\ˆØ[‹[
+Ø[Ù\]Y[˜ÙNŽ’[›™\“Ý]\’[›™\Š_B‚ŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊØ[Ù\]Y[˜ÙJB‚‹ËÓÜ˜ØBœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÕØ[\™XÝ[ÛžÂˆÈ˜]]È‹[
+Ø[\™XÝ[ÛŽŽ]]ÊHKˆÈ˜ØÝÈ‹[
+Ø[\™XÝ[ÛŽŽÛÝ[\ÛØÚÝÚ\ÙJHKˆÈ˜ÝÈ‹[
+Ø[\™XÝ[ÛŽŽÛØÚÝÚ\ÙJ_KŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊØ[\™XÝ[ÛŠB‚‹ËÐ”ÂœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ôš[Ù\]Y[˜ÙHÂˆÈ˜žH^Y\ˆ‹[
+š[Ù\]Y[˜ÙNŽžS^Y\ŠHKˆÈ˜žHØš™XÝ‹[
+š[Ù\]Y[˜ÙNŽžSØš™XÝ
+HBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊš[Ù\]Y[˜ÙJB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ôš[Ü™\žÂˆÈ™Y˜][‹[
+š[Ü™\ŽŽ‘Y˜][
+HKˆÈ˜\×ÛØš—Û\Ý‹[
+š[Ü™\ŽŽ\ÓØš™XÝ\Ý
+_KŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊš[Ü™\ŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÛXÚ[™Ó[ÙHÂˆÈœ™YÝ[\ˆ‹[
+ÛXÚ[™Ó[ÙNŽ”™YÝ[\ŠHKˆÈ™]™[—ÛÙ‹[
+ÛXÚ[™Ó[ÙNŽ‘]™[“Ù
+HKˆÈ˜ÛÜÙWÚÛ\È‹[
+ÛXÚ[™Ó[ÙNŽÛÜÙRÛ\ÊHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÛXÚ[™Ó[ÙJB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÝ\ÜX]\šX[]\›ˆÂˆÈœ™XÝ[[™X\ˆ‹Û\™XÝ[[™X\ˆKˆÈœ™XÝ[[™X\‹YÜšY‹Û\™XÝ[[™X\‘ÜšYKˆÈšÛ™^XÛÛXˆ‹Û\Û™^XÛÛXˆKˆÈ›YÚš[™È‹Û\YÚš[™ÈKˆÈ™Y˜][‹Û\Y˜][KˆÈšÛÝÈ‹Û\›Û™_KŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÝ\ÜX]\šX[]\›ŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÝ\ÜX]\šX[Ý[HÂˆÈ™Y˜][‹Û\ÑY˜][KˆÈ™ÜšY‹Û\ÑÜšYKˆÈœÛYÈ‹Û\ÔÛYÈKˆÈ™YWÜÛ[H‹Û\Õ™YTÛ[HKˆÈ™YWÜÝ›Û™È‹Û\Õ™YTÝ›Û™ÈKˆÈ™YWÚXœšY‹Û\Õ™YRXœšYKˆÈ›Ü™Ø[šXÈ‹Û\Õ™YSÜ™Ø[šXÈBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÝ\ÜX]\šX[Ý[JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÝ\ÜX]\šX[[\™˜XÙT]\›ˆÂˆÈ˜]]È‹ÛZ\]]ÈKˆÈœ™XÝ[[™X\ˆ‹ÛZ\™XÝ[[™X\ˆKˆÈ˜ÛÛ˜Ù[šXÈ‹ÛZ\ÛÛ˜Ù[šXÈKˆÈœ™XÝ[[™X\—Ú[\›XÙY‹ÛZ\™XÝ[[™X\’[\›XÙYKˆÈ™ÜšY‹ÛZ\ÜšYBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÝ\ÜX]\šX[[\™˜XÙT]\›ŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÝ\Ü\^ÂˆÈ››Ü›X[
+]]ÊH‹Ý›Ü›X[]]ÈKˆÈ™YJ]]ÊH‹Ý™YP]]ÈKˆÈ››Ü›X[
+X[X[
+H‹Ý›Ü›X[KˆÈ™YJX[X[
+H‹Ý™YHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÝ\Ü\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÙX[TÜÚ][ÛˆÂˆÈ›™X\™\Ý‹Ü™X\™\ÝKˆÈ˜[YÛ™Y‹Ü[YÛ™YKˆÈ˜[YÛ™YØ˜XÚÈ‹Ü[YÛ™Y˜XÚÈKˆÈ˜˜XÚÈ‹Ü™X\ˆKˆÈœ˜[™ÛH‹Ü˜[™ÛHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÙX[TÜÚ][ÛŠB‚‹ËÈÜ˜ØBœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÙX[TØØ\™•\^ÂˆÈ››Û™H‹[
+ÙX[TØØ\™•\NŽ“›Û™JHKˆÈ™^\›˜[‹[
+ÙX[TØØ\™•\NŽ‘^\›˜[
+HKˆÈ˜[‹[
+ÙX[TØØ\™•\NŽ[
+HKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÙX[TØØ\™•\JB‚‹ËÈÜ˜ØBœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÞÂˆÈ››Û™H‹[
+[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÎŽ™]œÝ›Û™JHKˆÈ™[œÝ\™WØÜš]XØ[ÛÛ›H‹[
+[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÎŽ™]œÝÜš]XØ[Û›JHKˆÈ™[œÝ\™WÛ[Ù\˜]H‹[
+[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÎŽ™]œÝ[Ù\˜]JHKˆÈ™[œÝ\™WØ[‹[
+[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÎŽ™]œÝ[
+HKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÊB‚‹ËÈÜ˜ØBœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ò[\›˜[œšYÙQš[\ˆÂˆÈ™\ØX›Y‹X™‘\ØX›YKˆÈ›[Z]Y‹X™“[Z]YKˆÈ››Ùš[\ˆ‹X™“›Ùš[\ˆKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ[\›˜[œšYÙQš[\ŠB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ[˜X›Q^˜PœšYÙS^Y\ˆÂˆÈ™\ØX›Y‹X›\ØX›YKˆÈ™^\›˜[ØœšYÙWÛÛ›H‹X›^\›˜[œšYÙSÛ›HKˆÈš[\›˜[ØœšYÙWÛÛ›H‹X›[\›˜[œšYÙSÛ›HKˆÈ˜\WÝ×Ø[‹X›\UÐ[KŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ[˜X›Q^˜PœšYÙS^Y\ŠB‚‹ËÈÜ˜ØBœÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÑØ\š[\™Ù]ÂˆÈ™]™\ž]Ú\™H‹Ù]™\ž]Ú\™HKˆÈÜ›ÝÛH‹ÙÜ›ÝÛHKˆÈ››ÝÚ\™H‹Ù›ÝÚ\™HKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊØ\š[\™Ù]
+B‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÓQ\Ü^SÜšY[][ÛˆHÂˆÈ›[™ØØ\H‹ÛYÓ[™ØØ\_KˆÈœÜ˜Z]‹ÛYÔÜ˜Z]BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÓQ\Ü^SÜšY[][ÛŠB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÓT[\ÛÛ›™XÝ[Û“[ÙHHÂˆÈžšYÞ˜YÈ‹Û\ÛVšYÖ˜YßKˆÈ˜Ü›ÜÜÈ‹Û\ÛPÜ›ÜÜßKˆÈ™[˜[ZXÈ‹Û\ÛQ[˜[ZXßBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÓT[\ÛÛ›™XÝ[Û“[ÙJB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÓSX]\šX[ÜYYHÂˆÈœÛÝÈ‹Û[\ÔÛÝßKˆÈ™˜\Ý‹Û[\Ñ˜\ÝBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÓSX]\šX[ÜYY
+NÂ‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ðœš[U\HHÂˆÈ››×Øœš[H‹›Ðœš[_KˆÈ›Ý]\—ÛÛ›H‹Ý]\“Û›_KˆÈš[›™\—ÛÛ›H‹[›™\“Û›_KˆÈ›Ý]\—Ø[™Ú[›™\ˆ‹Ý]\[™[›™\ŸKˆÈ˜]]×Øœš[H‹]]Ðœš[_KËÈ”ÂˆÈ˜œš[WÙX\œÈ‹X\ŸKËÈÜ˜ØBˆÈœZ[Y‹Z[YKËÈ”ÂŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊœš[U\JB‚‹ËÈ\Ú[™ÈHÈÛÛ\]X›HÚ]Ûš[\ÂœÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Õ[Y[\ÙU\HHÂˆÈŒ‹˜Y][Û˜[KˆÈŒH‹Û[ÛÝBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ[Y[\ÙU\JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÔÚÚ\\HHÂˆÈ˜ÛÛXš[™Y‹ÝÛÛXš[™YKˆÈœ\›Øš™XÝ‹Ý\“Øš™XÝBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÚÚ\\JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ˜YÚY[HÂˆÈ™\ØX›Y‹Ñ\ØX›YKˆÈ™[˜X›Y‹Ñ[˜X›YBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ˜YÚY[
+B‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ñ›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[HHÂˆÈ™\ØX›H‹›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[NŽ‘\ØX›HKˆÈ™[˜X›H‹›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[NŽ‘[˜X›HKˆÈ™[˜X›WÜÚ[[‹›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[NŽ‘[˜X›TÚ[[BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÓÝ™\š[™Ñ˜[•™\ÚÛHÂˆÈŒ	H‹Ý™\š[™×Ý™\ÚÛÛ›Û™HKˆÈŒL	H‹Ý™\š[™×Ý™\ÚÛÌWÍKˆÈŒIH‹Ý™\š[™×Ý™\ÚÛÌ—ÍKˆÈL	H‹Ý™\š[™×Ý™\ÚÛÌ×ÍKˆÈÍIH‹Ý™\š[™×Ý™\ÚÛÍÍKˆÈŽMIH‹Ý™\š[™×Ý™\ÚÛØœšYÙHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÝ™\š[™Ñ˜[•™\ÚÛ
+B‚‹ËÈ”ÂœÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ð™Y\HHÂˆÈ‘Y˜][]H‹Y˜][KˆÈ”Ý\\XÚÈ]H‹Ý\\•XÚÈKˆÈÛÛÛ]H‹ÈKˆÈ‘[™Ú[™Y\š[™È]H‹TKˆÈ’YÚ[\]H‹RHKˆÈ•^\™YRH]H‹HKˆÈ•^\™YÛÛÛ]H‹ÕKˆËÈØ[›ÛšXØ[˜[YH›ÜˆÑTÔ
+RNˆ‘Ü˜\XÈY™™XÝ]HŠKˆÙY\YØXÞHÝš[™ÈÛÈÛ›Ú™XÝËÌÓQˆÝ[\Ù\šX[^™K‚ˆÈ‘Ü˜\XÈY™™XÝ]H‹ÑTÔKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ™Y\JB‚›˜[Y\ÜXÙHÂ‹ËÈÛÈÙ^\ÈX\ÈÑTÔÈ[[WÛ˜[Y\×Ùœ›ÛWÚÙ^\×ÛX\\ÜÚYÛœÈH^XÛÙÜ˜\XØ[H\ÝÙ^HÈ˜[Y\ÖØÑTÔK‚‹ËÈ›Ü˜ÙHHØ[›ÛšXØ[Ýš[™È\ÙYžHÙ\šX[^™J
+HÈÓQˆ^Ü‚œÝXÝ™Y\QÙ\ÜØ[›ÛšXØ[Ù\šX[^™S˜[YBžÂˆ™Y\QÙ\ÜØ[›ÛšXØ[Ù\šX[^™S˜[YJ
+BˆÂˆYˆ
+×ÚÙ^\×Û˜[Y\×Ð™Y\KœÚ^™J
+HˆÚ^™WÝ
+ÑTÔ
+JBˆ×ÚÙ^\×Û˜[Y\×Ð™Y\VÜÚ^™WÝ
+ÑTÔ
+WHH‘Ü˜\XÈY™™XÝ]HŽÂˆBŸH×Ø™YÝ\WÙÙ\ÜØØ[›ÛšXØ[ÜÙ\šX[^™WÛ˜[YNÂŸHËÈ˜[Y\ÜXÙB‚‹ËÈ”ÂœÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ó^Y\”Ù\HHÂˆÈ]]È‹›Ð]]ÈKˆÈÝ\ÝÛZ^™H‹›ÐÝ\ÝÛZ^™HKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ^Y\”Ù\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ó›Þž›U\HÂˆÈ[™Yš[™H‹[
+›Þž›U\NŽ›[™Yš[™JHKˆÈš\™[™YÜÝY[‹[
+›Þž›U\NŽ›\™[™YÝY[
+HKˆÈœÝZ[›\Ü×ÜÝY[‹[
+›Þž›U\NŽ›ÝZ[›\ÜÔÝY[
+HKˆÈ˜œ˜\ÜÈ‹[
+›Þž›U\NŽ›œ˜\ÜÊHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ›Þž›U\JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ôš[\”ÝXÝ\™HÂˆÈ[™Yš[™H‹[
+š[\”ÝXÝ\™NŽœÕ[™Yš[™J_KˆÈ˜ÛÜ™^H‹[
+š[\”ÝXÝ\™NŽœÐÛÜ™VJ_KˆÈšLÈ‹[
+š[\”ÝXÝ\™NŽœÒLÊ_KˆÈš›Ý‹[
+š[\”ÝXÝ\™NŽœÒ›Ý
+_KˆÈ™[H‹[
+š[\”ÝXÝ\™NŽœÑ[J_BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊš[\”ÝXÝ\™JB‚œÝ]XÈØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ô\š[Y]\‘Ù[™\˜]Ü•\^ÂˆÈ˜Û\ÜÚXÈ‹[
+\š[Y]\‘Ù[™\˜]Ü•\NŽÛ\ÜÚXÊHKˆÈ˜\˜XÚ™H‹[
+\š[Y]\‘Ù[™\˜]Ü•\NŽ\˜XÚ™JHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ\š[Y]\‘Ù[™\˜]Ü•\JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ö’Ü\HHÂˆÈ]]ÈY‹š]]ÈKˆÈ“›Ü›X[Y‹š›Ü›X[KˆÈ”ÛÜHY‹šÛÜHKˆÈ”Ü\˜[Y‹šÜ\˜[BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ’Ü\JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\Ô™]˜XÝY[™›Ü˜ÙU\HHÂˆÈ[Ý\™˜XÙ\È‹›][Ý\™˜XÙ\ßKˆÈ•ÜÛ›H‹›]ÜÛ›_KˆÈ›ÝÛHÛ›H‹›]›ÝÛSÛ›_KˆÈ•Ü[™›ÝÛH‹›]Ü[™›ÝÛ_BŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊ™]˜XÝY[™›Ü˜ÙU\JB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÑÐÛÙU[X›˜Z[Ñ›Ü›X]HÂˆÈ”‘È‹[
+ÐÛÙU[X›˜Z[Ñ›Ü›X]Ž”‘ÊHKˆÈ’”È‹[
+ÐÛÙU[X›˜Z[Ñ›Ü›X]Ž’”ÊHKˆÈ”SÒH‹[
+ÐÛÙU[X›˜Z[Ñ›Ü›X]Ž”SÒJHKˆÈ•Õ•‹[
+ÐÛÙU[X›˜Z[Ñ›Ü›X]Ž•Õ•
+HKˆÈÓÓPÈ‹[
+ÐÛÙU[X›˜Z[Ñ›Ü›X]ŽÛÛXÊHBŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÐÛÙU[X›˜Z[Ñ›Ü›X]
+B‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÐÛÝ[\˜›Ü™RÛPœšYÚ[™ÓÜ[ÛžÂˆÈ››Û™H‹Ú“›Û™HKˆÈœ\X[XœšYÙH‹ÚœšYÙ\ÈKˆÈœØXÜšYšXÚX[^Y\ˆ‹Ú‘š[YKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÛÝ[\˜›Ü™RÛPœšYÚ[™ÓÜ[ÛŠB‚œÝ]XÈÛÛœÝØÛÛ™šY×Ù[[WÝ˜[Y\È×ÚÙ^\×ÛX\ÕÚ\UÝÙ\•Ø[\^ÂˆÈœ™XÝ[™ÛH‹ÝÔ™XÝ[™Û_KˆÈ˜ÛÛ™H‹ÝÐÛÛ™_KˆÈœšXˆ‹ÝÔšXŸKŸNÂÓÓ‘’Q×ÓÔSÓ—ÑS•SWÑQ’S‘WÔÕUP×ÓPTÊÚ\UÝÙ\•Ø[\JB‚œÝ]XÈ›ÚY\ÜÚYÛ—Üš[\—ÝXÚ›ÛÙÞWÝ×Ý[šÛ›ÝÛŠÛÜ[Û™Y—ÛX\	›Ü[ÛœËš[\•XÚ›ÛÙÞHš[\—ÝXÚ›ÛÙÞJBžÂˆ›Üˆ
+ÝŽœZ\ÛÛœÝØÛÛ™šY×ÛÜ[Û—ÚÙ^KÛÛ™šYÓÜ[Û‘Yˆ	šÝœˆÜ[ÛœÊBˆYˆ
+ÝœœÙXÛÛ™œš[\—ÝXÚ›ÛÙÞHOH[šÛ›ÝÛŠBˆÝœœÙXÛÛ™œš[\—ÝXÚ›ÛÙÞHHš[\—ÝXÚ›ÛÙÞNÂŸB‚”š[ÛÛ™šYÑYŽŽ”š[ÛÛ™šYÑYŠ
+BžÂˆ\ËOš[š]ØÛÛ[[Û—Ü\˜[\Ê
+NÂˆ\ÜÚYÛ—Üš[\—ÝXÚ›ÛÙÞWÝ×Ý[šÛ›ÝÛŠ\ËO›Ü[ÛœË[žJNÂˆ\ËOš[š]Ù™™—Ü\˜[\Ê
+NÂˆ\ËOš[š]Ù^Y\—ÛÜ[Û—ÚÙ^\Ê
+NÂˆ\ÜÚYÛ—Üš[\—ÝXÚ›ÛÙÞWÝ×Ý[šÛ›ÝÛŠ\ËO›Ü[ÛœË‘‘ŠNÂˆ\ËOš[š]ÜÛWÜ\˜[\Ê
+NÂˆ\ÜÚYÛ—Üš[\—ÝXÚ›ÛÙÞWÝ×Ý[šÛ›ÝÛŠ\ËO›Ü[ÛœËÓJNÂŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[š]ØÛÛ[[Û—Ü\˜[\Ê
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+œš[\—ÝXÚ›ÛÙÞH‹ÛÑ[[JNÂˆY‹O›X™[H
+”š[\ˆXÚ›ÛÙÞHŠNÂˆËÙY‹OÛÛ\H
+”š[\ˆXÚ›ÛÙÞKˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[Oš[\•XÚ›ÛÙÞOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‘‘‘ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ÓHŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[Oš[\•XÚ›ÛÙÞOŠ‘‘ŠJNÂ‚ˆYˆH\ËO˜Y
+œš[X›WØ\™XH‹ÛÔÚ[ÊNÂˆY‹O›X™[H
+”š[X›H\™XHŠNÂˆËÐ”ÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[ÞÈ™XÌ™
+
+K™XÌ™
+Œ
+K™XÌ™
+ŒŒ
+K™XÌ™
+Œ
+HJNÂ‚ˆËÐ”ÎˆY˜™YÙ^ÛYWØ\™XH‚ˆYˆH\ËO˜Y
+˜™YÙ^ÛYWØ\™XH‹ÛÔÚ[ÊNÂˆY‹O›X™[H
+™Y^ÛYH\™XHŠNÂˆY‹OÛÛ\H
+•[œš[X›H\™XH[ˆH[™Kˆ›Üˆ^[\KHÙ\šY\Èš[\œÈ\ÙHHœ›ÛYÛÜ›™\ˆÈÝ]š[[Y[\š[™Èš[[Y[Ú[™ÙKˆ‚ˆ•H\™XH\È^™\ÜÙY\ÈÛYÛÛˆžHÚ[È[ˆ›ÛÝÚ[™È›Ü›X]ˆ–KK‹‹—ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ›Û™WÜÝš[™ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[ÞÈ™XÌ™
+
+HJNÂ‚ˆYˆH\ËO˜Y
+˜™YØÝ\ÝÛWÝ^\™H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+™YÝ\ÝÛH^\™HŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ›Û™WÜÝš[™ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+˜™YØÝ\ÝÛWÛ[Ù[‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+™YÝ\ÝÛH[Ù[ŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ›Û™WÜÝš[™ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+™[Y˜[Ù›ÛÝØÛÛ\[œØ][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘[\[›ÛÝÛÛ\[œØ][ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”Úš[šÜÈH[š]X[^Y\ˆÛˆZ[]HÈÛÛ\[œØ]H›Üˆ[\[›ÛÝY™™XÝˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+™[Y˜[Ù›ÛÝØÛÛ\[œØ][Û—Û^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+‘[\[›ÛÝÛÛ\[œØ][Ûˆ^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•H[X™\ˆÙˆ^Y\œÈÛˆÚXÚH[\[›ÛÝÛÛ\[œØ][ÛˆÚ[™HXÝ]™Kˆ‚ˆ•Hš\œÝ^Y\ˆÚ[™HÚ[šÈžHH[\[›ÛÝÛÛ\[œØ][Ûˆ˜[YK[ˆ‚ˆH™^^Y\œÈÚ[™H[™X\›HÚ[šÈ\ÜË\ÈH^Y\ˆ[™XØ]YžH\È˜[YKˆŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂB‚ˆYˆH\ËO˜Y
+›^Y\—ÚZYÚ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“^Y\ˆZYÚŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”ÛXÚ[™ÈZYÚ›ÜˆXXÚ^Y\‹ˆÛX[\ˆ^Y\ˆZYÚYX[œÈ[Ü™HXØÝ\˜]H[™[Ü™Hš[[™È[YKˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+œš[X›WÚZYÚ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”š[X›HZYÚŠNÂˆY‹OÛÛ\H
+“X^[][Hš[X›HZYÚÚXÚ\È[Z]YžHYXÚ[š\ÛHÙˆš[\‹ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HŒMÌÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œ™Y™\œ™YÛÜšY[][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”™Y™\œ™YÜšY[][ÛˆŠNÂˆY‹OÛÛ\H
+]]ÛX]XØ[HÜšY[ÝÈÛˆHˆ^\È\Ûˆ[š]X[[\ÜˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›X^HÍŒÂˆY‹O›Z[ˆHLÍŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆËÈÜ[ÛœÈ\ÙYžH\ÚXØ[š[\œÂ‚ˆYˆH\ËO˜Y
+œ™\Ù]Û˜[Y\È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”š[\ˆ™\Ù]˜[Y\ÈŠNÂˆËÙY‹OÛÛ\H
+“˜[Y\ÈÙˆ™\Ù]È™[]YÈH\ÚXØ[š[\‹ˆŠNÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+˜˜›Ý\ÙWÜš[ÜÝ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•\ÙHÜ™\\Hš[ÜÝŠNÂˆY‹OÛÛ\H
+[ÝÈÛÛ›Û[™È˜[XSX‰ÜÈš[\ˆ›ÝYÚÜ™\Hš[ÜÝËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œš[ÚÜÝ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+’ÜÝ˜[YKTÜˆT“ŠNÂˆY‹OÛÛ\H
+”Û˜\XZÙ\ˆÜ˜ØHØ[ˆ\ØYËXÛÙHš[\ÈÈHš[\ˆÜÝˆ\ÈšY[ÚÝ[ÛÛZ[ˆ‚ˆHÜÝ˜[YKTY™\ÜÈÜˆT“ÙˆHš[\ˆÜÝ[œÝ[˜ÙKˆ‚ˆ”š[ÜÝ™Z[™T›ÞHÚ]˜\ÚXÈ]][˜X›YØ[ˆ™HXØÙ\ÜÙYžH][™ÈH\Ù\ˆ˜[YH[™\ÜÝÛÜ™[ÈHT“‚ˆš[ˆH›ÛÝÚ[™È›Ü›X]ˆÎ‹ËÝ\Ù\›˜[YNœ\ÜÝÛÜ™[Ý\‹[ØÝÜKXY™\ÜËÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÚÜÝÝÙXZH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘]šXÙHRHŠNÂˆY‹OÛÛ\H
+”ÜXÚYžHHT“Ùˆ[Ý\ˆ]šXÙH\Ù\ˆ[\™˜XÙHYˆ]	ÜÈ›ÝØ[YH\Èš[ÚÜÝˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝØ\ZÙ^H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+THÙ^HÈ\ÜÝÛÜ™ŠNÂˆY‹OÛÛ\H
+”Û˜\XZÙ\ˆÜ˜ØHØ[ˆ\ØYËXÛÙHš[\ÈÈHš[\ˆÜÝˆ\ÈšY[ÚÝ[ÛÛZ[ˆ‚ˆHTHÙ^HÜˆH\ÜÝÛÜ™™\]Z\™Y›Üˆ]][XØ][Û‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝÜÜ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[\ˆŠNÂˆY‹OÛÛ\H
+“˜[YHÙˆHš[\‹ˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽœÙ[XÝÛÜ[ŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝØØYš[H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+’ÈÐHš[HŠNÂˆY‹OÛÛ\H
+Ý\ÝÛHÐHÙ\YšXØ]Hš[HØ[ˆ™HÜXÚYšYY›ÜˆÈØÝÔš[ÛÛ›™XÝ[ÛœË[ˆÜÜ[H›Ü›X]ˆ‚ˆ’YˆY›[šËHY˜][ÔÈÐHÙ\YšXØ]H™\ÜÚ]ÜžH\È\ÙYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆËÈÜ[ÛœÈ\ÙYžH\ÚXØ[š[\œÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝÝ\Ù\ˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+•\Ù\ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝÜ\ÜÝÛÜ™‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”\ÜÝÛÜ™ŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆËÈÛ›H]˜Z[X›HÛˆÚ[™ÝÜË‚ˆYˆH\ËO˜Y
+œš[ÜÝÜÜÛÚYÛ›Ü™WÜ™]›ÚÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’YÛ›Ü™HÈÙ\YšXØ]H™]›ØØ][ÛˆÚXÚÜÈŠNÂˆY‹OÛÛ\H
+’YÛ›Ü™HÈÙ\YšXØ]H™]›ØØ][ÛˆÚXÚÜÈ[ˆØ\ÙHÙˆZ\ÜÚ[™ÈÜˆÙ™›[™H\ÝšX][ÛˆÚ[Ëˆ‚ˆ“Û™HX^HØ[È[˜X›H\ÈÜ[Ûˆ›ÜˆÙ[ˆÚYÛ™YÙ\YšXØ]\ÈYˆÛÛ›™XÝ[Ûˆ˜Z[ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œ™\Ù]Û˜[Y\È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”š[\ˆ™\Ù]˜[Y\ÈŠNÂˆY‹OÛÛ\H
+“˜[Y\ÈÙˆ™\Ù]È™[]YÈH\ÚXØ[š[\‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÝØ]]Üš^˜][Û—Ý\H‹ÛÑ[[JNÂˆY‹O›X™[H
+]]Üš^˜][Ûˆ\HŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O]]Üš^˜][Û•\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšÙ^HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ\Ù\ˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+THÙ^HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’YÙ\ÝŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O]]Üš^˜][Û•\OŠ]Ù^T\ÜÝÛÜ™
+JNÂˆˆËÈ[\Ü˜\žHÛÜšØ\›Ý[™›ÜˆÛÛ\]Xš[]HÚ]Û\ˆÛXÙ\‚ˆÂˆYˆH\ËO˜Y
+œ™\Ù]Û˜[YH‹ÛÔÝš[™ÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆBŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[š]Ù™™—Ü\˜[\Ê
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆËÈX^[][H^Y\ˆ[\\˜]\™K[\YÈMLÈÝ\Üš[[™ÈÙˆÛ\ÜË‚ˆÛÛœÝ[X^Ý[\HMLÂ‚ˆYˆH\ËO˜Y
+œ™YXÙWØÜ›ÜÜÚ[™×ÝØ[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+]›ÚYÜ›ÜÜÚ[™ÈØ[ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘]Ý\ˆ[™]›ÚYÈ˜]™[XÜ›ÜÜÈØ[ÚXÚX^HØ]\ÙH›ØˆÛˆÝ\™˜XÙHŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›X^Ý˜]™[Ù]Ý\—Ù\Ý[˜ÙH‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+]›ÚYÜ›ÜÜÚ[™ÈØ[ÈHX^]Ý\ˆ[™ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“X^[][H]Ý\ˆ\Ý[˜ÙH›Üˆ]›ÚY[™ÈÜ›ÜÜÚ[™ÈØ[ˆ‚ˆ‘Û‰Ý]Ý\ˆYˆH]Ý\ˆ\Ý[˜ÙH\È\™Ù\ˆ[ˆ\È˜[YKˆ‚ˆ‘]Ý\ˆ[™ÝÛÝ[™HÜXÚYšYYZ]\ˆ\È[ˆXœÛÛ]H˜[YHÜˆ\È\˜Ù[YÙH
+›Üˆ^[\HL	JHÙˆH\™XÝ˜]™[]ˆ™\›ÈÈ\ØX›KˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+œÝ\\XÚ×Ü]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌÍ_JNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛÛÜ]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈÍHJNÂ‚ˆYˆH\ËO˜Y
+^\™YØÛÛÛÜ]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈJNÂ‚ˆYˆH\ËO˜Y
+™[™×Ü]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈHJNÂ‚ˆYˆH\ËO˜Y
+šÝÜ]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈHJNÂ‚ˆYˆH\ËO˜Y
+^\™YÜ]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÍ_JNÂ‚ˆYˆH\ËO˜Y
+™Ü˜\X×ÙY™™XÝÜ]WÝ[\‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™H›Üˆ^Y\œÈ^Ù\H[š]X[Û™Kˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÈËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+™Y[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+œÝ\\XÚ×Ü]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈÍHJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛÛÜ]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈÍHJNÂ‚ˆYˆH\ËO˜Y
+^\™YØÛÛÛÜ]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈJNÂ‚ˆYˆH\ËO˜Y
+™[™×Ü]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈHJNÂ‚ˆYˆH\ËO˜Y
+šÝÜ]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈHJNÂ‚ˆYˆH\ËO˜Y
+^\™YÜ]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÍ_JNÂ‚ˆYˆH\ËO˜Y
+™Ü˜\X×ÙY™™XÝÜ]WÝ[\Ú[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ™Y[\\˜]\™HŠNÂˆY‹OÛÛ\H
+™Y[\\˜]\™HÙˆH[š]X[^Y\‹ˆ‚ˆH˜[YHÙˆYX[œÈHš[[Y[Ù\È›ÝÝ\Üš[[™ÈÛˆ\È]KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÈËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+˜Ý\œ—Ø™YÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+™Y\HŠNÂˆY‹OÛÛ\H
+™Y\\ÈÝ\ÜYžHHš[\‹ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹O™[[WÚÙ^\×ÛX\H	œ×ÚÙ^\×ÛX\Ð™Y\NÂˆËÈÜ˜ØNˆXZÙHÝ\™HHÜ™\ˆÙˆH˜[Y\È\ÈHØ[YH\ÈH™Y\H[[HˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊÛÛÛ]HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ‘[™Ú[™Y\š[™È]HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ’YÚ[\]HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ•^\™YRH]HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ•^\™YÛÛÛ]HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ”Ý\\XÚÈ]HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”Û[ÛÝÛÛÛ]HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+‘[™Ú[™Y\š[™È]HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”Û[ÛÝYÚ[\]HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+•^\™YRH]HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+•^\™YÛÛÛ]HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+ÛÛÛ]H
+Ý\\•XÚÊHŠJNÂˆËÈLHÛ›HÂˆY‹O™[[WÝ˜[Y\×ÝLK™[\XÙWØ˜XÚÊ•^\™YRH]HŠNÂˆY‹O™[[WÝ˜[Y\×ÝLK™[\XÙWØ˜XÚÊ’YÚ[\]HŠNÂˆY‹O™[[WÝ˜[Y\×ÝLK™[\XÙWØ˜XÚÊ‘Ü˜\XÈY™™XÝ]HŠNÂˆY‹O™[[WÛX™[×ÝLK™[\XÙWØ˜XÚÊ
+•^\™YRH]HŠJNÂˆY‹O™[[WÛX™[×ÝLK™[\XÙWØ˜XÚÊ
+”Û[ÛÝRH]HŠJNÂˆY‹O™[[WÛX™[×ÝLK™[\XÙWØ˜XÚÊ
+‘Ü˜\XÈY™™XÝ]HŠJNÂˆËÈLH\ÙHÈÚ[ˆÜ[ˆÝ\ÜÛ][WØ™YÝ\\ÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊÛÛÛ]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ‘[™Ú[™Y\š[™È]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ’YÚ[\]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ•^\™YRH]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ•^\™YÛÛÛ]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ”Ý\\XÚÈ]HŠNÂˆY‹O™[[WÝ˜[Y\×Ù^™[\XÙWØ˜XÚÊ‘Ü˜\XÈY™™XÝ]HŠNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+”Û[ÛÝÛÛÛ]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+‘[™Ú[™Y\š[™È]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+”Û[ÛÝRH]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+•^\™YRH]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+•^\™YÛÛÛ]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+ÛÛÛÝY[]HŠJNÂˆY‹O™[[WÛX™[×Ù^™[\XÙWØ˜XÚÊ
+‘Ü˜\XÈY™™XÝ]HŠJNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O™Y\OŠÊJNÂ‚ˆËÈÜ˜ØNˆ[ÝÈ›Ùš[HXZÙ\ˆÈÙ]Y˜][™Y\H[ˆXXÚ[™H›Ùš[BˆËÈ\ÈÜ[ÛˆÛÛ‰Ý™HÚÝÛˆ[ˆHRBˆYˆH\ËO˜Y
+™Y˜][Ø™YÝ\H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘Y˜][™Y\HŠNÂˆY‹OÛÛ\H
+‘Y˜][™Y\H›ÜˆHš[\ˆ
+Ý\ÜÈ›Ý[Y\šXÈ[™Ýš[™È›Ü›X]
+KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—Üš[ÜÙ\]Y[˜ÙH‹ÛÒ[ÊNÂˆY‹O›X™[H
+‘š\œÝ^Y\ˆš[Ù\]Y[˜ÙHŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HMŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+›Ý\—Û^Y\œ×Üš[ÜÙ\]Y[˜ÙH‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈš[Ù\]Y[˜ÙHŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HMŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+›Ý\—Û^Y\œ×Üš[ÜÙ\]Y[˜ÙWÛ[\È‹ÛÒ[
+NÂˆY‹O›X™[H
+•H[X™\ˆÙˆÝ\ˆ^Y\œÈš[Ù\]Y[˜ÙHŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÌJNÂ‚ˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—ÜÙ\]Y[˜ÙWØÚÚXÙH‹ÛÑ[[JNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹O›X™[H
+‘š\œÝ^Y\ˆš[[Y[Ù\]Y[˜ÙHŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O^Y\”Ù\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ]]ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊÝ\ÝÛZ^™HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+]]ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Ý\ÝÛZ^™HŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O^Y\”Ù\OŠ›Ð]]ÊJNÂ‚ˆYˆH\ËO˜Y
+›Ý\—Û^Y\œ×ÜÙ\]Y[˜ÙWØÚÚXÙH‹ÛÑ[[JNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈš[[Y[Ù\]Y[˜ÙHŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O^Y\”Ù\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ]]ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊÝ\ÝÛZ^™HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+]]ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Ý\ÝÛZ^™HŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O^Y\”Ù\OŠ›Ð]]ÊJNÂ‚ˆYˆH\ËO˜Y
+˜™Y›Ü™WÛ^Y\—ØÚ[™ÙWÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+™Y›Ü™H^Y\ˆÚ[™ÙHËXÛÙHŠNÂˆY‹OÛÛ\H
+•\ÈËXÛÙH\È[œÙ\Y]]™\žH^Y\ˆÚ[™ÙH™Y›Ü™HHˆYˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+˜›ÝÛWÜÚ[Û^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+›ÝÛHÚ[^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÈËÈÔÐHYÚYH^ˆY‹OÛÛ\H
+•\È\ÈH[X™\ˆÙˆÛÛY^Y\œÈÙˆ›ÝÛHÚ[[˜ÛY[™ÈH›ÝÛH‚ˆœÝ\™˜XÙH^Y\‹ˆÚ[ˆHXÚÛ™\ÜÈØ[Ý[]YžH\È˜[YH\È[›™\ˆ‚ˆ[ˆ›ÝÛHÚ[XÚÛ™\ÜËH›ÝÛHÚ[^Y\œÈÚ[™H[˜Ü™X\ÙYˆŠNÂˆY‹O™[ÛX™[H
+›ÝÛHÚ[^Y\œÈŠNÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+ÊJNÂ‚ˆYˆH\ËO˜Y
+˜›ÝÛWÜÚ[ÝXÚÛ™\ÜÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+›ÝÛHÚ[XÚÛ™\ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H[X™\ˆÙˆ›ÝÛHÛÛY^Y\œÈ\È[˜Ü™X\ÙYÚ[ˆÛXÚ[™ÈYˆHXÚÛ™\ÜÈØ[Ý[]YžH›ÝÛHÚ[^Y\œÈ\È‚ˆ[›™\ˆ[ˆ\È˜[YKˆ\ÈØ[ˆ]›ÚY]š[™ÈÛÈ[ˆÚ[Ú[ˆ^Y\ˆZYÚ\ÈÛX[ˆYX[œÈ]‚ˆ\ÈÙ][™È\È\ØX›Y[™XÚÛ™\ÜÈÙˆ›ÝÛHÚ[\ÈXœÛÛ][H]\›Z[™YžH›ÝÛHÚ[^Y\œËˆŠNÂˆY‹O™[ÛX™[H
+›ÝÛHÚ[XÚÛ™\ÜÈŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+™Ø\Ùš[Ý\™Ù]‹ÛÑ[[JNÂˆY‹O›X™[H
+\HØ\š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+‘[˜X›\ÈØ\š[›ÜˆHÙ[XÝYÛÛYÝ\™˜XÙ\ËˆHZ[š[][HØ\[™Ý]Ú[™Hš[YØ[ˆ™HÛÛ›ÛY‚ˆ™œ›ÛHHš[\ˆÝ][žHØ\ÈÜ[Ûˆ™[ÝË——ˆ‚ˆ“Ü[ÛœÎ—ˆ‚ˆŒKˆ]™\ž]Ú\™Nˆ\Y\ÈØ\š[ÈÜ›ÝÛH[™[\›˜[ÛÛYÝ\™˜XÙ\È›ÜˆX^[][HÝ™[™Ýˆ‚ˆŒ‹ˆÜ[™›ÝÛHÝ\™˜XÙ\Îˆ\Y\ÈØ\š[ÈÜ[™›ÝÛHÝ\™˜XÙ\ÈÛ›K˜[[˜Ú[™Èš[ÜYY‚ˆœ™YXÚ[™ÈÝ[X[Ý™\ˆ^\Ú[Ûˆ[ˆHÛÛY[™š[[™XZÚ[™ÈÝ\™HHÜ[™›ÝÛHÝ\™˜XÙ\È]™H‚ˆ››È[šÛHØ\×ˆ‚ˆŒËˆ›ÝÚ\™Nˆ\ØX›\ÈØ\š[›Üˆ[ÛÛY[™š[\™X\×—ˆ‚ˆ“›ÝH]Yˆ\Ú[™ÈHÛ\ÜÚXÈ\š[Y]\ˆÙ[™\˜]Ü‹Ø\š[X^H[ÛÈ™HÙ[™\˜]Y™]ÙY[ˆ\š[Y]\œË‚ˆšYˆH[ÚY[™HØ[››Ýš]™]ÙY[ˆ[Kˆ]\š[Y]\ˆØ\š[\È›ÝÛÛ›ÛYžH\ÈÙ][™Ë——ˆ‚ˆ’Yˆ[ÝHÛÝ[ZÙH[Ø\š[[˜ÛY[™ÈHÛ\ÜÚXÈ\š[Y]\ˆÙ[™\˜]YÛ™K™[[Ý™Y‚ˆœÙ]Hš[\ˆÝ][žHØ\È˜[YHÈH\™ÙH[X™\‹ZÙHNNNNNK——ˆ‚ˆ’ÝÙ]™\ˆ\È\È›ÝYš\ÙY\ÈØ\š[™]ÙY[ˆ\š[Y]\œÈ\ÈÛÛšX][™ÈÈH[Ù[	ÜÈÝ™[™Ýˆ‚ˆ‘›Üˆ[Ù[ÈÚ\™H^Ù\ÜÚ]™HØ\š[\ÈÙ[™\˜]Y™]ÙY[ˆ\š[Y]\œËH™]\ˆÜ[ÛˆÛÝ[™HÈ‚ˆœÝÚ]ÚÈH\˜XÚ™HØ[Ù[™\˜]Üˆ[™\ÙH\ÈÜ[ÛˆÈÛÛ›ÛÚ]\ˆHÛÜÛY]XÈÜ[™‚ˆ˜›ÝÛHÝ\™˜XÙHØ\š[\ÈÙ[™\˜]YˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OØ\š[\™Ù]ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™]™\ž]Ú\™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊÜ›ÝÛHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››ÝÚ\™HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘]™\ž]Ú\™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•Ü[™›ÝÛHÝ\™˜XÙ\ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›ÝÚ\™HŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OØ\š[\™Ù]ŠÙ›ÝÚ\™JJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÛÝ™\š[™×ØœšYÙWÙ˜[ˆ‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘›Ü˜ÙHÛÛÛ[™È›ÜˆÝ™\š[™ÜÈ[™œšYÙ\ÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈ[ÝÈY\ÝY[ÙˆH\ÛÛÛ[™È˜[ˆÜYY›ÜˆÜXÚYšXØ[H›ÜˆÝ™\š[™ÜË[\›˜[[™^\›˜[‚ˆ˜œšYÙ\ËˆÙ][™ÈH˜[ˆÜYYÜXÚYšXØ[H›Üˆ\ÙH™X]\™\ÈØ[ˆ[\›Ý™HÝ™\˜[š[]X[]H[™™YXÙHØ\œ[™ËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÈYHJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ù˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý™\š[™ÜÈ[™^\›˜[œšYÙ\È˜[ˆÜYYŠNÂˆY‹OÛÛ\H
+•\ÙH\È\ÛÛÛ[™È˜[ˆÜYYÚ[ˆš[[™ÈœšYÙ\ÈÜˆÝ™\š[™ÈØ[ÈÚ][ˆÝ™\š[™È™\ÚÛ]^ÙYYÈ‚ˆH˜[YHÙ][ˆH	ÓÝ™\š[™ÜÈÛÛÛ[™È™\ÚÛ	È\˜[Y]\ˆX›Ý™Kˆ[˜Ü™X\Ú[™ÈHÛÛÛ[™ÈÜXÚYšXØ[H›ÜˆÝ™\š[™ÜÈ‚ˆ˜[™œšYÙ\ÈØ[ˆ[\›Ý™HHÝ™\˜[š[]X[]HÙˆ\ÙH™X]\™\Ë——ˆ‚ˆ”X\ÙH›ÝK\È˜[ˆÜYY\ÈÛ[\YÛˆHÝÙ\ˆ[™žHHZ[š[][H˜[ˆÜYY™\ÚÛÙ]X›Ý™Kˆ]\È[ÛÈY\ÝY‚ˆ\Ø\™È\ÈHX^[][H˜[ˆÜYY™\ÚÛÚ[ˆHZ[š[][H^Y\ˆ[YH™\ÚÛ\È›ÝY]ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈLJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ù˜[—Ý™\ÚÛ‹ÛÑ[[\ÊNÂˆY‹O›X™[H
+“Ý™\š[™ÈÛÛÛ[™ÈXÝ]˜][Ûˆ™\ÚÛŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+•Ú[ˆHÝ™\š[™È^ÙYYÈ\ÈÜXÚYšYY™\ÚÛ›Ü˜ÙHHÛÛÛ[™È˜[ˆÈ[ˆ]H	ÓÝ™\š[™È˜[ˆÜYY	ÈÙ]™[ÝËˆ‚ˆ•\È™\ÚÛ\È^™\ÜÙY\ÈH\˜Ù[YÙK[™XØ][™ÈHÜ[ÛˆÙˆXXÚ[™IÜÈÚY]\È[œÝ\ÜYžHH^Y\ˆ‚ˆ˜™[™X]]ˆÙ][™È\È˜[YHÈ	H›Ü˜Ù\ÈHÛÛÛ[™È˜[ˆÈ[ˆ›Üˆ[Ý]\ˆØ[Ë™YØ\™\ÜÈÙˆHÝ™\š[™ÈYÜ™YKˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÝ™\š[™Ñ˜[•™\ÚÛŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŒ	HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŒL	HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŒIHŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊL	HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊÍIHŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŽMIHŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊŒ	HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊŒL	HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊŒIHŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊL	HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊÍIHŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊŽMIHŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[\ÑÙ[™\šXÞÈ
+[
+SÝ™\š[™×Ý™\ÚÛØœšYÙHJNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWØ[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^\›˜[œšYÙH[™š[\™XÝ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+œšYÚ[™È[™ÛHÝ™\œšYKˆYˆYÈ™\›ËHœšYÚ[™È[™ÛHÚ[™HØ[Ý[]Y‚ˆ˜]]ÛX]XØ[KˆÝ\Ú\ÙHH›ÝšYY[™ÛHÚ[™H\ÙY›Üˆ^\›˜[œšYÙ\Ëˆ‚ˆ•\ÙHN0¬›Üˆ™\›È[™ÛKˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂˆˆËÈÔÐNˆ[\›˜[œšYÙH[™ÛHÝ™\œšYBˆYˆH\ËO˜Y
+š[\›˜[ØœšYÙWØ[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›˜[œšYÙH[™š[\™XÝ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+’[\›˜[œšYÚ[™È[™ÛHÝ™\œšYKˆYˆYÈ™\›ËHœšYÚ[™È[™ÛHÚ[™HØ[Ý[]Y‚ˆ˜]]ÛX]XØ[KˆÝ\Ú\ÙHH›ÝšYY[™ÛHÚ[™H\ÙY›Üˆ[\›˜[œšYÙ\Ëˆ‚ˆ•\ÙHN0¬›Üˆ™\›È[™ÛK——’]\È™XÛÛ[Y[™YÈX]™H]][›\ÜÈ\™H\ÈHÜXÚYšXÈ[Ù[™YY›ÝËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWÙ[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+‘^\›˜[œšYÙH[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+ÛÛ›ÛÈH[œÚ]H
+ÜXÚ[™ÊHÙˆ^\›˜[œšYÙH[™\ËˆL	HYX[œÈÛÛYœšYÙKˆY˜][\ÈL	K——ˆ‚ˆ“ÝÙ\ˆ[œÚ]H^\›˜[œšYÙ\ÈØ[ˆ[[\›Ý™H™[XXš[]H\È\™H\È[Ü™HÜXÙH›ÜˆZ\ˆÈÚ\˜Ý[]H‚ˆ˜\›Ý[™H^YYœšYÙK[\›Ýš[™È]ÈÛÛÛ[™ÈÜYYˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHLÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ØœšYÙWÙ[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+’[\›˜[œšYÙH[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+ÛÛ›ÛÈH[œÚ]H
+ÜXÚ[™ÊHÙˆ[\›˜[œšYÙH[™\ËˆL	HYX[œÈÛÛYœšYÙKˆY˜][\ÈL	K——ˆ‚ˆ“ÝÙ\ˆ[œÚ]H[\›˜[œšYÙ\ÈØ[ˆ[™YXÙHÜÝ\™˜XÙH[ÝÚ[™È[™[\›Ý™H[\›˜[œšYÙH™[XXš[]H\È\™H\È[Ü™HÜXÙH›Üˆ‚ˆ˜Z\ˆÈÚ\˜Ý[]H\›Ý[™H^YYœšYÙK[\›Ýš[™È]ÈÛÛÛ[™ÈÜYY——ˆ‚ˆ•\ÈÜ[ÛˆÛÜšÜÈ\XÝ[\›HÙ[Ú[ˆÛÛXš[™YÚ]HÙXÛÛ™[\›˜[œšYÙHÝ™\ˆ[™š[Ü[Û‹‚ˆ™\\ˆ[\›Ýš[™È[\›˜[œšYÚ[™ÈÝXÝ\™H™Y›Ü™HÛÛY[™š[\È^YYˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHLÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWÙ›ÝÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œšYÙH›ÝÈ˜][ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘XÜ™X\ÙH\È˜[YHÛYÚH
+›Üˆ^[\HŽJHÈ™YXÙHH[[Ý[ÙˆX]\šX[›ÜˆœšYÙKÈ[\›Ý™HØYË——ˆ‚ˆ•HXÝX[œšYÙH›ÝÈ\ÙY\ÈØ[Ý[]YžH][\Z[™È\È˜[YHÚ]Hš[[Y[›ÝÈ˜][Ë[™YˆÙ]HØš™XÝ	ÜÈ›ÝÈ˜][ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^H‹ŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ØœšYÙWÙ›ÝÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›˜[œšYÙH›ÝÈ˜][ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•\È˜[YHÛÝ™\›œÈHXÚÛ™\ÜÈÙˆH[\›˜[œšYÙH^Y\‹ˆ\È\ÈHš\œÝ^Y\ˆÝ™\ˆÜ\œÙH[™š[ˆXÜ™X\ÙH\È˜[YHÛYÚH
+›Üˆ^[\HŽJHÈ[\›Ý™HÝ\™˜XÙH]X[]HÝ™\ˆÜ\œÙH[™š[ˆ‚ˆ——•HXÝX[[\›˜[œšYÙH›ÝÈ\ÙY\ÈØ[Ý[]YžH][\Z[™È\È˜[YHÚ]HœšYÙH›ÝÈ˜][ËHš[[Y[›ÝÈ˜][Ë[™YˆÙ]HØš™XÝ	ÜÈ›ÝÈ˜][ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^H‹ŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+ÜÜÛÛYÚ[™š[Ù›Ý×Ü˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙH›ÝÈ˜][ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹OÛÛ\H
+•\È˜XÝÜˆY™™XÝÈH[[Ý[ÙˆX]\šX[›ÜˆÜÛÛY[™š[ˆ‚ˆ–[ÝHØ[ˆXÜ™X\ÙH]ÛYÚHÈ]™HÛ[ÛÝÝ\™˜XÙHš[š\Ú——ˆ‚ˆ•HXÝX[ÜÝ\™˜XÙH›ÝÈ\ÙY\ÈØ[Ý[]YžH][\Z[™È\È˜[YHÚ]Hš[[Y[›ÝÈ˜][Ë[™YˆÙ]HØš™XÝ	ÜÈ›ÝÈ˜][ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+˜›ÝÛWÜÛÛYÚ[™š[Ù›Ý×Ü˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+›ÝÛHÝ\™˜XÙH›ÝÈ˜][ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹OÛÛ\H
+•\È˜XÝÜˆY™™XÝÈH[[Ý[ÙˆX]\šX[›Üˆ›ÝÛHÛÛY[™š[——ˆ‚ˆ•HXÝX[›ÝÛHÛÛY[™š[›ÝÈ\ÙY\ÈØ[Ý[]YžH][\Z[™È\È˜[YHÚ]Hš[[Y[›ÝÈ˜][Ë[™YˆÙ]HØš™XÝ	ÜÈ›ÝÈ˜][ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚‚ˆYˆH\ËO˜Y
+œ™XÚ\ÙWÛÝ]\—ÝØ[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™XÚ\ÙHØ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+’[\›Ý™HÚ[™XÚ\Ú[ÛˆžHY\Ý[™ÈÝ]\ˆØ[ÜXÚ[™Ëˆ\È[ÛÈ[\›Ý™\È^Y\ˆÛÛœÚ\Ý[˜ÞKˆ“ÕNˆ\ÈÜ[Ûˆ‚ˆÚ[™HYÛ›Ü™Y›ÜˆÝ]\‹Z[›™\ˆÜˆ[›™\‹[Ý]\‹Z[›™\ˆØ[Ù\]Y[˜Ù\ËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÝY_JNÂ‚ˆYˆH\ËO˜Y
+›Û›WÛÛ™WÝØ[ÝÜ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“Û›HÛ™HØ[ÛˆÜÝ\™˜XÙ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•\ÙHÛ›HÛ™HØ[Ûˆ›]ÜÝ\™˜XÙ\ËÈÚ]™H[Ü™HÜXÙHÈHÜ[™š[]\›‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆËÈHÛÛ\\ÈÛÜYYœ›ÛHÝ\\”ÝY[ÂˆYˆH\ËO˜Y
+›Z[—ÝÚYÝÜÜÝ\™˜XÙH‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+“Û™HØ[™\ÚÛŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+’YˆHÜÝ\™˜XÙH\ÈÈ™Hš[Y[™]	ÜÈ\X[HÛÝ™\™YžH[›Ý\ˆ^Y\‹]ÛÛ‰Ý™HÛÛœÚY\™Y]HÜ^Y\ˆÚ\™H]ÈÚY\È™[ÝÈ\È˜[YKˆ‚ˆˆ\ÈØ[ˆ™H\ÙY[È›Ý]H	ÛÛ™H\š[Y]\ˆÛˆÜ	ÈšYÙÙ\ˆÛˆÝ\™˜XÙH]ÚÝ[™HÛÝ™\™YÛ›HžH\š[Y]\œËˆ‚ˆˆ\È˜[YHØ[ˆ™HH[HÜˆH	HÙˆH\š[Y]\ˆ^\Ú[ÛˆÚYˆ‚ˆ—•Ø\›š[™ÎˆYˆ[˜X›Y\Y˜XÝÈØ[ˆ™HÜ™X]YYˆ[ÝH]™HÛÛYH[ˆ™X]\™\ÈÛˆH™^^Y\‹ZÙH]\œËˆÙ]\ÈÙ][™ÈÈÈ™[[Ý™H\ÙH\Y˜XÝËˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆHš[›™\—ÝØ[Û[™WÝÚYŽÂˆY‹O›Z[ˆHÂˆY‹O›X^Û]\˜[HMNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+ÌYJJNÂ‚ˆYˆH\ËO˜Y
+›Û›WÛÛ™WÝØ[Ùš\œÝÛ^Y\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“Û›HÛ™HØ[Ûˆš\œÝ^Y\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•\ÙHÛ›HÛ™HØ[Ûˆš\œÝ^Y\‹ÈÚ]™H[Ü™HÜXÙHÈH›ÝÛH[™š[]\›‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™^˜WÜ\š[Y]\œ×ÛÛ—ÛÝ™\š[™ÜÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^˜H\š[Y]\œÈÛˆÝ™\š[™ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+Ü™X]HY][Û˜[\š[Y]\ˆ]ÈÝ™\ˆÝY\Ý™\š[™ÜÈ[™\™X\ÈÚ\™HœšYÙ\ÈØ[››Ý™H[˜ÚÜ™YˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ü™]™\œÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™]™\œÙHÛˆ]™[ˆŠNÂˆY‹O™[ÛX™[H
+“Ý™\š[™È™]™\œØ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘^YH\š[Y]\œÈ]]™HH\Ý™\ˆ[ˆÝ™\š[™È[ˆH™]™\œÙH\™XÝ[ÛˆÛˆ]™[ˆ^Y\œËˆ\È[\›˜][™È]\›ˆØ[ˆ˜\ÝXØ[H[\›Ý™HÝY\Ý™\š[™ÜË——•\ÈÙ][™ÈØ[ˆ[ÛÈ[™YXÙH\Ø\œ[™ÈYHÈH™YXÝ[ÛˆÙˆÝ™\ÜÙ\È[ˆH\Ø[ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ü™]™\œÙWÚ[\›˜[ÛÛ›H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™]™\œÙHÛ›H[\›˜[\š[Y]\œÈŠNÂˆY‹O™[ÛX™[H
+”™]™\œÙHÛ›H[\›˜[\š[Y]\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+\HH™]™\œÙH\š[Y]\œÈÙÚXÈÛ›HÛˆ[\›˜[\š[Y]\œË——ˆ‚ˆ•\ÈÙ][™ÈÜ™X]H™YXÙ\È\Ý™\ÜÙ\È\È^H\™H›ÝÈ\ÝšX]Y[ˆ[\›˜][™È\™XÝ[ÛœËˆ‚ˆ•\ÈÚÝ[™YXÙH\Ø\œ[™ÈÚ[H[ÛÈXZ[Z[š[™È^\›˜[Ø[]X[]Kˆ‚ˆ•\È™X]\™HØ[ˆ™H™\žH\ÙY[›ÜˆØ\œ›Û™HX]\šX[ZÙHP”ËÐTÐK[™[ÛÈ›Üˆ[\ÝXÈš[[Y[ËZÙHH[™Ú[ÈKˆ‚ˆ’]Ø[ˆ[ÛÈ[™YXÙHØ\œ[™ÈÛˆ›Ø][™È™YÚ[ÛœÈÝ™\ˆÝ\ÜË——‘›Üˆ\ÈÙ][™ÈÈ™HH[ÜÝY™™XÝ]™K‚ˆš]\È™XÛÛ[Y[™YÈÙ]H™]™\œÙH™\ÚÛÈÛÈ][[\›˜[Ø[Èš[[ˆ[\›˜][™È\™XÝ[ÛœÈÛˆ]™[ˆ^Y\œÈ\œ™\ÜXÝ]™HÙˆZ\ˆÝ™\š[™ÈYÜ™YKˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÝ[\˜›Ü™WÚÛWØœšYÚ[™È‹ÛÑ[[JNÂˆY‹O›X™[H
+œšYÙHÛÝ[\˜›Ü™HÛ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+ˆ•\ÈÜ[ÛˆÜ™X]\ÈœšYÙ\È›ÜˆÛÝ[\˜›Ü™HÛ\Ë[ÝÚ[™È[HÈ™Hš[YÚ]Ý]Ý\Üˆ]˜Z[X›H[Ù\È[˜ÛYN—ˆ‚ˆŒKˆ›Û™Nˆ›ÈœšYÙH\ÈÜ™X]Yˆ‚ˆŒ‹ˆ\X[HœšYÙYˆÛ›HH\ÙˆH[œÝ\ÜY\™XHÚ[™HœšYÙYˆ‚ˆŒËˆØXÜšYšXÚX[^Y\ŽˆH[ØXÜšYšXÚX[œšYÙH^Y\ˆ\ÈÜ™X]YŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÛÝ[\˜›Ü™RÛPœšYÚ[™ÓÜ[ÛŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ››Û™HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊœ\X[XœšYÙHŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊœØXÜšYšXÚX[^Y\ˆŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+“›Û™HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”\X[HœšYÙYŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”ØXÜšYšXÚX[^Y\ˆŠJNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÛÝ[\˜›Ü™RÛPœšYÚ[™ÓÜ[ÛŠÚ“›Û™JJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ü™]™\œÙWÝ™\ÚÛ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”™]™\œÙH™\ÚÛŠNÂˆY‹O™[ÛX™[H
+“Ý™\š[™È™]™\œØ[™\ÚÛŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+“[X™\ˆÙˆ[HHÝ™\š[™È™YYÈ™H›ÜˆH™]™\œØ[È™HÛÛœÚY\™Y\ÙY[ˆØ[ˆ™HH	HÙˆH\š[Y]\ˆÚYˆ‚ˆ—•˜[YH[˜X›\È™]™\œØ[Ûˆ]™\žH]™[ˆ^Y\œÈ™YØ\™\ÜËˆ‚ˆ—•Ú[ˆ]XÝÝ™\š[™ÈØ[\È›Ý[˜X›Y\ÈÜ[Ûˆ\ÈYÛ›Ü™Y[™™]™\œØ[\[œÈÛˆ]™\žH]™[ˆ^Y\œÈ™YØ\™\ÜËˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›[™WÝÚYŽÂˆY‹O›Z[ˆHÂˆY‹O›X^Û]\˜[HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÛÝ™\š[™×ÜÜYY‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”ÛÝÈÝÛˆ›ÜˆÝ™\š[™ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈÛÝÈš[[™ÈÝÛˆ›ÜˆY™™\™[Ý™\š[™ÈYÜ™YKˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈYHJNÂˆˆYˆH\ËO˜Y
+œÛÝÙÝÛ—Ù›Ü—ØÝ\›YÜ\š[Y]\œÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”ÛÝÈÝÛˆ›ÜˆÝ\›Y\š[Y]\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈÛÝÈÝÛˆš[[™È[ˆ\™X\ÈÚ\™H\š[Y]\œÈX^H]™HÝ\›Y\Ø\™Ëˆ‚ˆ‘›Üˆ^[\KY][Û˜[ÛÝÙÝÛˆÚ[™H\YYÚ[ˆš[[™ÈÝ™\š[™ÜÈÛˆÚ\œÛÜ›™\œÈZÙHH‚ˆ™œ›ÛÙˆH™[˜ÚH[™YXÚ[™ÈÝ\›[™ÈÚXÚÛÛ\Ý[™ÈÝ™\ˆ][\H^Y\œË——ˆ‚ˆ’]\ÈÙ[™\˜[H™XÛÛ[Y[™YÈ]™H\ÈÜ[ÛˆÝÚ]ÚYÛˆ[›\ÜÈ[Ý\ˆš[\ˆÛÛÛ[™È\ÈÝÙ\™[[›ÝYÚÜˆH‚ˆœš[ÜYYÛÝÈ[›ÝYÚ]\š[Y]\ˆÝ\›[™ÈÙ\È›Ý\[‹ˆYˆš[[™ÈÚ]HYÚ^\›˜[\š[Y]\ˆÜYY‚ˆ\È\˜[Y]\ˆX^H[›ÙXÙHÛYÚ\Y˜XÝÈÚ[ˆÛÝÚ[™ÈÝÛˆYHÈH\™ÙH˜\šX[˜ÙH[ˆš[ÜYYËˆ‚ˆ’Yˆ[ÝH›ÝXÙH\Y˜XÝË[œÝ\™H[Ý\ˆ™\ÜÝ\™HY˜[˜ÙH\È[™YÛÜœ™XÝK——ˆ‚ˆ“›ÝNˆÚ[ˆ\ÈÜ[Ûˆ\È[˜X›YÝ™\š[™È\š[Y]\œÈ\™H™X]YZÙHÝ™\š[™ÜËYX[š[™ÈHÝ™\š[™ÈÜYY\È‚ˆ˜\YY]™[ˆYˆHÝ™\š[™Ú[™È\š[Y]\ˆ\È\ÙˆHœšYÙKˆ›Üˆ^[\KÚ[ˆH\š[Y]\œÈ\™HL	HÝ™\š[™Ú[™È‚ˆ‹Ú]›ÈØ[Ý\Ü[™È[Hœ›ÛH[™\›™X]HL	HÝ™\š[™ÈÜYYÚ[™H\YYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈYHJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×ÌWÍÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[HŠL	KIJHŽÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹O™[ÛX™[HŠL	KIJHŽÂˆËÙY‹OÛÛ\H
+”ÜYY›Üˆ[™HÙˆØ[ÚXÚ\ÈYÜ™YHÙˆÝ™\š[™È™]ÙY[ˆL	H[™IH[™HÚYˆ‚ˆËÈŒYX[œÈ\Ú[™ÈÜšYÚ[˜[Ø[ÜYYˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ÜÜYYŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ì—ÍÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H–ÌIKL	JHŽÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹O™[ÛX™[H–ÌIKL	JHŽÂˆËÙY‹OÛÛ\H
+”ÜYY›Üˆ[™HÙˆØ[ÚXÚ\ÈYÜ™YHÙˆÝ™\š[™È™]ÙY[ˆIH[™L	H[™HÚYˆ‚ˆËÈŒYX[œÈ\Ú[™ÈÜšYÚ[˜[Ø[ÜYYˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ÜÜYYŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×Ì×ÍÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H–ÍL	KÍIJHŽÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹O™[ÛX™[H–ÍL	KÍIJHŽÂˆËÙY‹OÛÛ\H
+”ÜYY›Üˆ[™HÙˆØ[ÚXÚ\ÈYÜ™YHÙˆÝ™\š[™È™]ÙY[ˆL	H[™ÍIH[™HÚYˆ‚ˆËÈŒYX[œÈ\Ú[™ÈÜšYÚ[˜[Ø[ÜYYˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ÜÜYYŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý™\š[™×ÍÍÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H–ÍÍIKL	JHŽÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹O™[ÛX™[H–ÍÍIKL	JHŽÂˆËÙY‹OÛÛ\H
+”ÜYY›Üˆ[™HÙˆØ[ÚXÚ\ÈYÜ™YHÙˆÝ™\š[™È™]ÙY[ˆÍIH[™L	H[™HÚYˆ‚ˆËÈŒYX[œÈ\Ú[™ÈÜšYÚ[˜[Ø[ÜYYˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ÜÜYYŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^\›˜[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆH^\›˜[Hš\ÚX›HœšYÙH^\Ú[ÛœË——ˆ‚ˆ’[ˆY][Û‹YˆÛÝÈÝÛˆ›ÜˆÝ\›Y\š[Y]\œÈ\È\ØX›YÜˆÛ\ÜÚXÈÝ™\š[™È[ÙH\È[˜X›Y‚ˆš]Ú[™HHš[ÜYYÙˆÝ™\š[™ÈØ[È]\™HÝ\ÜYžH\ÜÈ[ˆLÉK‚ˆÚ]\ˆ^H\™H\ÙˆHœšYÙHÜˆ[ˆÝ™\š[™ËˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ØœšYÙWÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[\›˜[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆ[\›˜[œšYÙ\ËˆYˆH˜[YH\È^™\ÜÙY\ÈH\˜Ù[YÙK]Ú[™HØ[Ý[]Y˜\ÙYÛˆHœšYÙWÜÜYYˆY˜][˜[YH\ÈML	KˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH˜œšYÙWÜÜYYŽÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+MLYJJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œš[HÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘\Ý[˜ÙHœ›ÛH[Ù[ÈHÝ]\›[ÜÝœš[H[™KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+œš[H\HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÛÛ›ÛÈHÙ[™\˜][ÛˆÙˆHœš[H]Ý]\ˆ[™ÛÜˆ[›™\ˆÚYHÙˆ[Ù[Ëˆ‚ˆ]]ÈYX[œÈHœš[HÚY\È[˜[^™Y[™Ø[Ý[]Y]]ÛX]XØ[KˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[Oœš[U\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ˜]]×Øœš[HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ˜œš[WÙX\œÈŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊœZ[YŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ›Ý]\—ÛÛ›HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊš[›™\—ÛÛ›HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ›Ý]\—Ø[™Ú[›™\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ››×Øœš[HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+]]ÈŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+“[Ý\ÙHX\ˆŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”Z[YŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+“Ý]\ˆœš[HÛ›HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+’[›™\ˆœš[HÛ›HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+“Ý]\ˆ[™[›™\ˆœš[HŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+“›ËXœš[HŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[Oœš[U\OŠ]]Ðœš[JJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÛØš™XÝÙØ\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œš[K[Øš™XÝØ\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+HØ\™]ÙY[ˆ[›™\›[ÜÝœš[H[™H[™Øš™XÝØ[ˆXZÙHœš[H™H™[[Ý™Y[Ü™HX\Ú[KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÙX\œÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+œš[HX\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“Û›H˜]Èœš[HÝ™\ˆHÚ\œYÙ\ÈÙˆH[Ù[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÙX\œ×ÛX^Ø[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œš[HX\ˆX^[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“X^[][H[™ÛHÈ]Hœš[HX\ˆ\X\‹—ˆ‚ˆ’YˆÙ]È›Èœš[HÚ[™HÜ™X]Y—ˆ‚ˆ’YˆÙ]ÈŒNœš[HÚ[™HÜ™X]YÛˆ]™\ž][™È]Ý˜ZYÚÙXÝ[ÛœËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LJJNÂ‚ˆYˆH\ËO˜Y
+˜œš[WÙX\œ×Ù]XÝ[Û—Û[™Ý‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œš[HX\ˆ]XÝ[Ûˆ˜Y]\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•HÙ[ÛY]žHÚ[™HXÚ[X]Y™Y›Ü™H]XÝ[™ÈÚ\œ[™Û\Ëˆ‚ˆ•\È\˜[Y]\ˆ[™XØ]\ÈHZ[š[][H[™ÝÙˆH]šX][Ûˆ›ÜˆHXÚ[X][Û‹—ˆ‚ˆŒÈXXÝ]˜]KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÜš[\œÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”Ù[XÝš[\œÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆËÐ”Ë‚ˆYˆH\ËO˜Y
+\Ø\™ØÛÛ\]X›WÛXXÚ[™H‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+\Ø\™ÛÛ\]X›HXXÚ[™HŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÜš[\œ×ØÛÛ™][Ûˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+ÛÛ™][ÛˆŠNÂˆY‹OÛÛ\H
+H›ÛÛX[ˆ^™\ÜÚ[Ûˆ\Ú[™ÈHÛÛ™šYÝ\˜][Ûˆ˜[Y\ÈÙˆ[ˆXÝ]™Hš[\ˆ›Ùš[Kˆ‚ˆ’Yˆ\È^™\ÜÚ[Ûˆ]˜[X]\ÈÈYK\È›Ùš[H\ÈÛÛœÚY\™YÛÛ\]X›H‚ˆÚ]HXÝ]™Hš[\ˆ›Ùš[KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÜš[È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”Ù[XÝ›Ùš[\ÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÜš[×ØÛÛ™][Ûˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+ÛÛ™][ÛˆŠNÂˆY‹OÛÛ\H
+H›ÛÛX[ˆ^™\ÜÚ[Ûˆ\Ú[™ÈHÛÛ™šYÝ\˜][Ûˆ˜[Y\ÈÙˆ[ˆXÝ]™Hš[›Ùš[Kˆ‚ˆ’Yˆ\È^™\ÜÚ[Ûˆ]˜[X]\ÈÈYK\È›Ùš[H\ÈÛÛœÚY\™YÛÛ\]X›H‚ˆÚ]HXÝ]™Hš[›Ùš[KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆËÈH›ÛÝÚ[™È˜[YH\ÈÈ™HÝÜ™Y[ÈH›Ú™XÝš[H
+SQ‹ÓQ‹ÛÛ™šYÈ‹‹ŠBˆËÈ[™]ÛÛZ[œÈHÝ[HÙˆ˜ÛÛ\]X›WÜš[\œ×ØÛÛ™][Ûˆˆ˜[Y\ÈÝ™\ˆHš[[™š[[Y[›Ùš[\Ë‚ˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÛXXÚ[™WÙ^™\ÜÚ[Û—ÙÜ›Ý\‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆYˆH\ËO˜Y
+˜ÛÛ\]X›WÜ›ØÙ\Ü×Ù^™\ÜÚ[Û—ÙÜ›Ý\‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆËÐ”ÎˆYÙÚXÈ›ÜˆÚXÚÚ[™È™]ÙY[ˆY™™\™[Þ\Ý[H™\Ù]ÂˆYˆH\ËO˜Y
+™Y™™\™[ÜÙ][™Ü×Ý×ÜÞ\Ý[H‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œš[ØÛÛ\]X›WÜš[\œÈ‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œš[ÜÙ\]Y[˜ÙH‹ÛÑ[[JNÂˆY‹O›X™[H
+”š[Ù\]Y[˜ÙHŠNÂˆY‹OÛÛ\H
+”š[Ù\]Y[˜ÙK^Y\ˆžH^Y\ˆÜˆØš™XÝžHØš™XÝˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜žH^Y\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜žHØš™XÝŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+žH^Y\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+žHØš™XÝŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠš[Ù\]Y[˜ÙNŽžS^Y\ŠJNÂ‚ˆYˆH\ËO˜Y
+œš[ÛÜ™\ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+’[˜K[^Y\ˆÜ™\ˆŠNÂˆY‹OÛÛ\H
+”š[Ü™\ˆÚ][ˆHÚ[™ÛH^Y\‹ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[Oš[Ü™\ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™Y˜][ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜\×ÛØš—Û\ÝŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘Y˜][ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+\ÈØš™XÝ\ÝŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[Oš[Ü™\Šš[Ü™\ŽŽ‘Y˜][
+JNÂ‚ˆYˆH\ËO˜Y
+œÛÝ×ÙÝÛ—Ù›Ü—Û^Y\—ØÛÛÛ[™È‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+”ÛÝÈš[[™ÈÝÛˆ›Üˆ™]\ˆ^Y\ˆÛÛÛ[™ÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈÛÝÈš[[™ÈÜYYÝÛˆÈXZÙHHš[˜[^Y\ˆ[YH›ÝÚÜ\ˆ[ˆ‚ˆH^Y\ˆ[YH™\ÚÛ[ˆ“X^˜[ˆÜYY™\ÚÛ‹ÛÈ]^Y\ˆØ[ˆ™HÛÛÛY›ÜˆÛ™Ù\ˆ[YKˆ‚ˆ•\ÈØ[ˆ[\›Ý™HHÛÛÛ[™È]X[]H›Üˆ™YYH[™ÛX[]Z[ËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈYHJNÂ‚ˆYˆH\ËO˜Y
+™Y˜][ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“›Ü›X[š[[™ÈŠNÂˆY‹OÛÛ\H
+•HY˜][XØÙ[\˜][ÛˆÙˆ›Ý›Ü›X[š[[™È[™˜]™[^Ù\[š]X[^Y\‹ˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+™Y˜][Ùš[[Y[Ü›Ùš[H‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘Y˜][š[[Y[›Ùš[HŠNÂˆY‹OÛÛ\H
+‘Y˜][š[[Y[›Ùš[HÚ[ˆÝÚ]Ú[™ÈÈ\ÈXXÚ[™H›Ùš[KˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+™Y˜][Üš[Ü›Ùš[H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘Y˜][›ØÙ\ÜÈ›Ùš[HŠNÂˆY‹OÛÛ\H
+‘Y˜][›ØÙ\ÜÈ›Ùš[HÚ[ˆÝÚ]Ú[™ÈÈ\ÈXXÚ[™H›Ùš[KˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+˜XÝ]˜]WØZ\—Ùš[˜][Ûˆ‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+XÝ]˜]HZ\ˆš[˜][ÛˆŠNÂˆY‹OÛÛ\H
+XÝ]˜]H›Üˆ™]\ˆZ\ˆš[˜][Û‹ˆËXÛÙHÛÛ[X[™ˆLLˆÈÊLMJHŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÙ˜[Ù_JNÂ‚ˆYˆH\ËO˜Y
+™\š[™×Üš[Ù^]\ÝÙ˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+‘˜[ˆÜYYŠNÂˆY‹OÛÛ\S
+”ÜYYÙˆ^]\Ý˜[ˆ\š[™Èš[[™Ëˆ\ÈÜYYÚ[Ý™\œšYHHÜYY[ˆš[[Y[Ý\ÝÛHËXÛÙKˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[LÂˆY‹O›X^LLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÍŒJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ\]WÜš[Ù^]\ÝÙ˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+‘˜[ˆÜYYŠNÂˆY‹OÛÛ\S
+”ÜYYÙˆ^]\Ý˜[ˆY\ˆš[[™ÈÛÛ\]\ËˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[LÂˆY‹O›X^LLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÎJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÜÙWÙ˜[—ÝWÙš\œÝÞÛ^Y\œÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+“›ÈÛÛÛ[™È›ÜˆHš\œÝŠNÂˆY‹OÛÛ\H
+•\›ˆÙ™ˆ[ÛÛÛ[™È˜[œÈ›ÜˆHš\œÝ™]È^Y\œËˆ‚ˆ•\ÈØ[ˆ™H\ÙYÈ[\›Ý™HZ[]HY\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈHJNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWÛ›×ÜÝ\Ü‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘Û‰ÝÝ\ÜœšYÙ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘Û‰ÝÝ\ÜHÚÛHœšYÙH\™XHÚXÚXZÙHÝ\Ü™\žH\™ÙKˆ‚ˆœšYÙ\ÈØ[ˆ\ÝX[H™Hš[Y\™XÝHÚ]Ý]Ý\ÜYˆ›Ý™\žHÛ™ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+XÚ×ØœšYÙ\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•XÚÈ^\›˜[œšYÙ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›YœšYÙ\È\™H[Ü™H™[XX›KØ[ˆœšYÙHÛ™Ù\ˆ\Ý[˜Ù\Ë]X^HÛÚÈÛÜœÙKˆ‚ˆ’Yˆ\ØX›YœšYÙ\ÈÛÚÈ™]\ˆ]\™H™[XX›H\Ý›ÜˆÚÜ\ˆœšYÙY\Ý[˜Ù\ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+XÚ×Ú[\›˜[ØœšYÙ\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•XÚÈ[\›˜[œšYÙ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›YXÚÈ[\›˜[œšYÙ\ÈÚ[™H\ÙYˆ]	ÜÈ\ÝX[H™XÛÛ[Y[™YÈ]™H\È™X]\™H\›™YÛ‹ˆÝÙ]™\‹‚ˆ˜ÛÛœÚY\ˆ\›š[™È]Ù™ˆYˆ[ÝH\™H\Ú[™È\™ÙH›Þž›\ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂˆˆYˆH\ËO˜Y
+™[˜X›WÙ^˜WØœšYÙWÛ^Y\ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+‘^˜HœšYÙH^Y\œÈ
+™]JHŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•\ÈÜ[Ûˆ[˜X›\ÈHÙ[™\˜][ÛˆÙˆ[ˆ^˜HœšYÙH^Y\ˆÝ™\ˆ[\›˜[[™ÛÜˆ^\›˜[œšYÙ\Ë——ˆ‚ˆ‘^˜HœšYÙH^Y\œÈ[[\›Ý™HœšYÙH\X\˜[˜ÙH[™™[XXš[]K\ÈHÛÛY[™š[\È™]\ˆÝ\ÜYˆ‚ˆ•\È\È\ÜXÚX[H\ÙY[[ˆ˜\Ýš[\œËÚ\™HHœšYÙH[™ÛÛY[™š[ÜYYÈ˜\žHÜ™X]Kˆ‚ˆ•H^˜HœšYÙH^Y\ˆ™\Ý[È[ˆ™YXÙY[ÝÚ[™ÈÛˆÜÝ\™˜XÙ\Ë\ÈÙ[\È™YXÙYÙ\\˜][ÛˆÙˆH^\›˜[œšYÙH^Y\ˆœ›ÛH]ÈÝ\œ›Ý[™[™È\š[Y]\œË——ˆ‚ˆ’]\ÈÙ[™\˜[H™XÛÛ[Y[™YÈÙ]\ÈÈ]X\Ý	Ñ^\›˜[œšYÙHÛ›IË[›\ÜÈÜXÚYšXÈ\ÜÝY\ÈÚ]HÛXÙY[Ù[\™H›Ý[™——ˆ‚ˆ“Ü[ÛœÎ—ˆ‚ˆŒKˆ\ØX›YHÙ\È›ÝÙ[™\˜]HÙXÛÛ™œšYÙH^Y\œËˆ\È\ÈHY˜][[™\ÈÙ]›ÜˆÛÛ\]Xš[]H\œÜÙ\×ˆ‚ˆŒ‹ˆ^\›˜[œšYÙHÛ›HHÙ[™\˜]\ÈÙXÛÛ™œšYÙH^Y\œÈ›Üˆ^\›˜[Y˜XÚ[™ÈœšYÙ\ÈÛ›KˆX\ÙH›ÝH]ÛX[œšYÙ\È]\™HÚÜ\ˆ‚ˆ›Üˆ˜\œ›ÝÙ\ˆ[ˆHÙ][X™\ˆÙˆ\š[Y]\œÈÚ[™HÚÚ\Y\È^HÛÝ[›Ý™[™Yš]œ›ÛHHÙXÛÛ™œšYÙH^Y\‹ˆYˆÙ[™\˜]Y‚ˆHÙXÛÛ™œšYÙH^Y\ˆÚ[™H^YY\˜[[ÈHš\œÝœšYÙH^Y\ˆÈ™Z[™›Ü˜ÙHHœšYÙHÝ™[™Ýˆ‚ˆŒËˆ[\›˜[œšYÙHÛ›HHÙ[™\˜]\ÈÙXÛÛ™œšYÙH^Y\œÈ›Üˆ[\›˜[œšYÙ\ÈÝ™\ˆÜ\œÙH[™š[Û›Kˆ‚ˆ”X\ÙH›ÝH]H[\›˜[œšYÙ\ÈÛÝ[ÝØ\™ÈHÜÚ[^Y\ˆÛÝ[Ùˆ[Ý\ˆ[Ù[ˆ‚ˆ•HÙXÛÛ™[\›˜[œšYÙH^Y\ˆÚ[™H^YY\ÈÛÜÙHÈ\œ[™XÝ[\ˆÈHš\œÝ\ÈÜÜÚX›Kˆ‚ˆ’Yˆ][\H™YÚ[ÛœÈ[ˆHØ[YH\Û[™Ú]˜\žZ[™ÈœšYÙH[™Û\È\™H™\Ù[H\Ý™YÚ[ÛˆÙˆ]\Û[™Ú[™HÙ[XÝY\ÈH[™ÛH™Y™\™[˜ÙWˆ‚ˆˆ\HÈ[HÙ[™\˜]\ÈÙXÛÛ™œšYÙH^Y\œÈ›Üˆ›Ý[\›˜[[™^\›˜[Y˜XÚ[™ÈœšYÙ\×ˆŠNÂ‚ˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[˜X›Q^˜PœšYÙS^Y\ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™\ØX›YŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™^\›˜[ØœšYÙWÛÛ›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš[\›˜[ØœšYÙWÛÛ›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜\WÝ×Ø[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘\ØX›YŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘^\›˜[œšYÙHÛ›HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’[\›˜[œšYÙHÛ›HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+\HÈ[ŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[˜X›Q^˜PœšYÙS^Y\ŠX›\ØX›Y
+JNÂ‚ˆYˆH\ËO˜Y
+™ÛÙš[\—Ú[\›˜[ØœšYÙ\È‹ÛÑ[[JNÂˆY‹O›X™[H
+‘š[\ˆÝ]ÛX[[\›˜[œšYÙ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•\ÈÜ[ÛˆØ[ˆ[™YXÙH[ÝÚ[™ÈÛˆÜÝ\™˜XÙ\È[ˆX]š[HÛ[YÜˆÝ\™Y[Ù[Ë—ˆ‚ˆžHY˜][ÛX[[\›˜[œšYÙ\È\™Hš[\™YÝ][™H[\›˜[ÛÛY[™š[\Èš[Y‚ˆ™\™XÝHÝ™\ˆHÜ\œÙH[™š[ˆ\ÈÛÜšÜÈÙ[[ˆ[ÜÝØ\Ù\ËÜYY[™È\š[[™ÈÚ]Ý]‚ˆÛÈ]XÚÛÛ\›ÛZ\ÙHÛˆÜÝ\™˜XÙH]X[]K—ˆ‚ˆ’ÝÙ]™\‹[ˆX]š[HÛ[YÜˆÝ\™Y[Ù[Ë\ÜXÚX[HÚ\™HÛÈÝÈHÜ\œÙH[™š[[œÚ]H‚ˆš\È\ÙY\ÈX^H™\Ý[[ˆÝ\›[™ÈÙˆH[œÝ\ÜYÛÛY[™š[Ø]\Ú[™È[ÝÚ[™Ë—ˆ‚ˆ‘[˜X›[™È[Z]Yš[\š[™ÈÜˆ›Èš[\š[™ÈÚ[š[[\›˜[œšYÙH^Y\ˆÝ™\ˆÛYÚH‚ˆ[œÝ\ÜY[\›˜[ÛÛY[™š[ˆHÜ[ÛœÈ™[ÝÈÛÛ›ÛHÙ[œÚ]]š]HÙˆHš[\š[™Ë‚ˆšK™Kˆ^HÛÛ›ÛÚ\™H[\›˜[œšYÙ\È\™HÜ™X]Y—ˆ‚ˆŒKˆš[\ˆH[˜X›\È\ÈÜ[Û‹ˆ\È\ÈHY˜][™Z]š[Üˆ[™ÛÜšÜÈÙ[[ˆ[ÜÝØ\Ù\×ˆ‚ˆŒ‹ˆ[Z]Yš[\š[™ÈHÜ™X]\È[\›˜[œšYÙ\ÈÛˆX]š[HÛ[YÝ\™˜XÙ\ÈÚ[H]›ÚY[™È‚ˆ[›™XÙ\ÜØ\žHœšYÙ\Ëˆ\ÈÛÜšÜÈÙ[›Üˆ[ÜÝY™šXÝ[[Ù[×ˆ‚ˆŒËˆ›Èš[\š[™ÈHÜ™X]\È[\›˜[œšYÙ\ÈÛˆ]™\žHÝ[X[[\›˜[Ý™\š[™Ëˆ\ÈÜ[Ûˆ\È‚ˆ\ÙY[›ÜˆX]š[HÛ[YÜÝ\™˜XÙH[Ù[ÎÈÝÙ]™\‹[ˆ[ÜÝØ\Ù\Ë]Ü™X]\ÈÛÈX[žH‚ˆ[›™XÙ\ÜØ\žHœšYÙ\ÈŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[\›˜[œšYÙQš[\ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™\ØX›YŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›[Z]YŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››Ùš[\ˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘š[\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“[Z]Yš[\š[™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›Èš[\š[™ÈŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[\›˜[œšYÙQš[\ŠX™‘\ØX›Y
+JNÂ‚‚ˆYˆH\ËO˜Y
+›X^ØœšYÙWÛ[™Ý‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^œšYÙH[™ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“X^[™ÝÙˆœšYÙ\È]Û‰Ý™YYÝ\ÜˆÙ]]ÈYˆ[ÝHØ[[œšYÙ\ÈÈ™HÝ\ÜY[™Ù]]ÈH™\žH\™ÙH˜[YHYˆ[ÝHÛ‰ÝØ[[žHœšYÙ\ÈÈ™HÝ\ÜYˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+›XXÚ[™WÙ[™ÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘[™ËXÛÙHŠNÂˆY‹OÛÛ\H
+‘[™ËXÛÙHÚ[ˆš[š\Ú[™ÈH[\™Hš[ˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê“LLÌÈ\›ˆÙ™ˆ[\\˜]\™W‘ÌŽÈÛYH^\×“NÈ\ØX›H[ÝÜœ×ˆŠJNÂ‚ˆYˆH\ËO˜Y
+œš[[™×ØžWÛØš™XÝÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+™]ÙY[ˆØš™XÝËXÛÙHŠNÂˆY‹OÛÛ\H
+’[œÙ\ËXÛÙH™]ÙY[ˆØš™XÝËˆ\È\˜[Y]\ˆÚ[Û›HÛÛYH[ÈY™™XÝÚ[ˆ[ÝHš[[Ý\ˆ[Ù[ÈØš™XÝžHØš™XÝˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ù[™ÙØÛÙH‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘[™ËXÛÙHŠNÂˆY‹OÛÛ\H
+‘[™ËXÛÙHÚ[ˆš[š\Ú[™ÈHš[[™ÈÙˆ\Èš[[Y[ˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈˆˆJNÂ‚ˆYˆH\ËO˜Y
+™[œÝ\™WÝ™\XØ[ÜÚ[ÝXÚÛ™\ÜÈ‹ÛÑ[[JNÂˆY‹O›X™[H
+‘[œÝ\™H™\XØ[Ú[XÚÛ™\ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+ˆYÛÛY[™š[™X\ˆÛÜ[™ÈÝ\™˜XÙ\ÈÈÝX\˜[YHH™\XØ[Ú[XÚÛ™\ÜÈ
+Ü
+Ø›ÝÛHÛÛY^Y\œÊW“›Û™Nˆ›ÈÛÛY[™š[‚ˆÚ[™HYY[ž]Ú\™KˆØ]][ÛŽˆ\ÙH\ÈÜ[ÛˆØ\™Y[HYˆ[Ý\ˆ[Ù[\ÈÛÜYÝ\™˜XÙ\×Üš]XØ[Û›Nˆ]›ÚYY[™ÈÛÛY[™š[›ÜˆØ[×“[Ù\˜]NˆYÛÛY[™š[›ÜˆX]š[H‚ˆœÛÜ[™ÈÝ\™˜XÙ\ÈÛ›W[ˆYÛÛY[™š[›Üˆ[ÝZ]X›HÛÜ[™ÈÝ\™˜XÙ\×‘Y˜][˜[YH\È[ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÏŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››Û™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[œÝ\™WØÜš]XØ[ÛÛ›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[œÝ\™WÛ[Ù\˜]HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[œÝ\™WØ[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›Û™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Üš]XØ[Û›HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“[Ù\˜]HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+[ŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÏŠ[œÝ\™U™\XØ[Ú[XÚÛ™\ÜÎŽ™]œÝ[
+JNÂˆˆ]]ÈY—ÝÜÙš[Ü]\›ˆHYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWÜ]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+•ÜÝ\™˜XÙH]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆÙˆÜÝ\™˜XÙH[™š[ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[™š[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›[Û›ÝÛšXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›[Û›ÝÛšXÛ[™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜[YÛ™Y™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÛ˜Ù[šXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš[™\Ý\™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜\˜Ú[YYX[˜ÚÜ™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›ØÝYÜ˜[\Ü\˜[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“[Û›ÝÛšXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“[Û›ÝÛšXÈ[™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+[YÛ™Y™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛ˜Ù[šXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’[™\Ý\™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+\˜Ú[YYX[ˆÚÜ™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“ØÝYÜ˜[HÜ\˜[ŠJNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[™š[]\›Š\[Û›ÝÛšXÓ[™JJNÂ‚ˆYˆH\ËO˜Y
+˜›ÝÛWÜÝ\™˜XÙWÜ]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+›ÝÛHÝ\™˜XÙH]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆÙˆ›ÝÛHÝ\™˜XÙH[™š[›ÝœšYÙH[™š[ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[™š[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\ÈHY—ÝÜÙš[Ü]\›‹O™[[WÝ˜[Y\ÎÂˆY‹O™[[WÛX™[ÈHY—ÝÜÙš[Ü]\›‹O™[[WÛX™[ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[™š[]\›Š\[Û›ÝÛšXÊJNÂ‚‚YYˆH\ËO˜Y
+š[\›˜[ÜÛÛYÚ[™š[Ü]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+’[\›˜[ÛÛY[™š[]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆÙˆ[\›˜[ÛÛY[™š[ˆYˆH]XÝ˜\œ›ÝÈ[\›˜[ÛÛY[™š[™H[˜X›YHÛÛ˜Ù[šXÈ]\›ˆÚ[™H\ÙY›ÜˆHÛX[\™XKˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[™š[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\ÈHY—ÝÜÙš[Ü]\›‹O™[[WÝ˜[Y\ÎÂˆY‹O™[[WÛX™[ÈHY—ÝÜÙš[Ü]\›‹O™[[WÛX™[ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[™š[]\›Š\[Û›ÝÛšXÊJNÂˆˆYˆH\ËO˜Y
+›Ý]\—ÝØ[Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+“Ý]\ˆØ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚYÙˆÝ]\ˆØ[ˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý]\—ÝØ[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Ý]\ˆØ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆÝ]\ˆØ[ÚXÚ\ÈÝ]\›[ÜÝ[™š\ÚX›Kˆ‚ˆ’]	ÜÈ\ÙYÈ™HÛÝÙ\ˆ[ˆ[›™\ˆØ[ÜYYÈÙ]™]\ˆ]X[]KˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+œÛX[Ü\š[Y]\—ÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”ÛX[\š[Y]\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+•\ÈÙ\\˜]HÙ][™ÈÚ[Y™™XÝHÜYYÙˆ\š[Y]\œÈ]š[™È˜Y]\ÈHÛX[Ü\š[Y]\—Ý™\ÚÛ‚ˆŠ\ÝX[HÛ\ÊKˆYˆ^™\ÜÙY\È\˜Ù[YÙH
+›Üˆ^[\Nˆ	JH]Ú[™HØ[Ý[]Y‚ˆ›ÛˆHÝ]\ˆØ[ÜYYÙ][™ÈX›Ý™KˆÙ]È™\›È›Üˆ]]ËˆŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ÜÜYYŽÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+œÛX[Ü\š[Y]\—Ý™\ÚÛ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ÛX[\š[Y]\œÈ™\ÚÛŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+•\ÈÙ]ÈH™\ÚÛ›ÜˆÛX[\š[Y]\ˆ[™ÝˆY˜][™\ÚÛ\È[KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+Ø[ÜÙ\]Y[˜ÙH‹ÛÑ[[JNÂˆY‹O›X™[H
+•Ø[Èš[[™ÈÜ™\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”š[Ù\]Y[˜ÙHÙˆH[\›˜[
+[›™\ŠH[™^\›˜[
+Ý]\ŠHØ[Ë——ˆ‚ˆ•\ÙH[›™\‹ÓÝ]\ˆ›Üˆ™\ÝÝ™\š[™ÜËˆ\È\È™XØ]\ÙHHÝ™\š[™Ú[™ÈØ[ÈØ[ˆY\™HÈH™ZYÚ›Ý\š[™È\š[Y]\ˆÚ[Hš[[™Ëˆ‚ˆ’ÝÙ]™\‹\ÈÜ[Ûˆ™\Ý[È[ˆÛYÚH™YXÙYÝ\™˜XÙH]X[]H\ÈH^\›˜[\š[Y]\ˆ\ÈY›Ü›YYžH™Z[™ÈÜ]X\ÚYÈH[\›˜[\š[Y]\‹——ˆ‚ˆ•\ÙH[›™\‹ÓÝ]\‹Ò[›™\ˆ›ÜˆH™\Ý^\›˜[Ý\™˜XÙHš[š\Ú[™[Y[œÚ[Û˜[XØÝ\˜XÞH\ÈH^\›˜[Ø[\Èš[Y[™\Ý\˜™Yœ›ÛH[ˆ[\›˜[\š[Y]\‹ˆ‚ˆ’ÝÙ]™\‹Ý™\š[™È\™›Ü›X[˜ÙHÚ[™YXÙH\È\™H\È›È[\›˜[\š[Y]\ˆÈš[H^\›˜[Ø[YØZ[œÝˆ‚ˆ•\ÈÜ[Ûˆ™\]Z\™\ÈHZ[š[][HÙˆÈØ[ÈÈ™HY™™XÝ]™H\È]š[ÈH[\›˜[Ø[Èœ›ÛHHÜ™\š[Y]\ˆÛØ\™Èš\œÝ‚ˆ[ˆH^\›˜[\š[Y]\ˆ[™š[˜[KHš\œÝ[\›˜[\š[Y]\‹ˆ‚ˆ•\ÈÜ[Ûˆ\È™XÛÛ[Y[™YYØZ[œÝHÝ]\‹Ò[›™\ˆÜ[Ûˆ[ˆ[ÜÝØ\Ù\Ë——ˆ‚ˆ•\ÙHÝ]\‹Ò[›™\ˆ›ÜˆHØ[YH^\›˜[Ø[]X[]H[™[Y[œÚ[Û˜[XØÝ\˜XÞH™[™Yš]ÈÙˆ[›™\‹ÓÝ]\‹Ò[›™\ˆÜ[Û‹ˆ‚ˆ’ÝÙ]™\‹HˆÙX[\ÈÚ[\X\ˆ\ÜÈÛÛœÚ\Ý[\ÈHš\œÝ^\Ú[ÛˆÙˆH™]È^Y\ˆÝ\ÈÛˆHš\ÚX›HÝ\™˜XÙK——ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OØ[Ù\]Y[˜ÙOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš[›™\ˆØ[ÛÝ]\ˆØ[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›Ý]\ˆØ[Ú[›™\ˆØ[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš[›™\‹[Ý]\‹Z[›™\ˆØ[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’[›™\‹ÓÝ]\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“Ý]\‹Ò[›™\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’[›™\‹ÓÝ]\‹Ò[›™\ˆŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OØ[Ù\]Y[˜ÙOŠØ[Ù\]Y[˜ÙNŽ’[›™\“Ý]\ŠJNÂ‚ˆYˆH\ËO˜Y
+š\×Ú[™š[Ùš\œÝ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”š[[™š[š\œÝŠNÂˆY‹OÛÛ\H
+“Ü™\ˆÙˆØ[Ú[™š[ˆÚ[ˆHXÚØ›Þ\È[˜ÚXÚÙYHØ[È\™Hš[Yš\œÝÚXÚÛÜšÜÈ™\Ý[ˆ[ÜÝØ\Ù\Ë——”š[[™È[™š[š\œÝX^H[Ú]^™[YHÝ™\š[™ÜÈ\ÈHØ[È]™HH™ZYÚ›Ý\š[™È[™š[ÈY\™HËˆÝÙ]™\‹H[™š[Ú[ÛYÚH\ÚÝ]Hš[YØ[ÈÚ\™H]\È]XÚYÈ[K™\Ý[[™È[ˆHÛÜœÙH^\›˜[Ý\™˜XÙHš[š\Úˆ]Ø[ˆ[ÛÈØ]\ÙHH[™š[ÈÚ[™H›ÝYÚH^\›˜[Ý\™˜XÙ\ÈÙˆH\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÙ˜[Ù_JNÂ‚ˆYˆH\ËO˜Y
+Ø[Ù\™XÝ[Ûˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+•Ø[ÛÜ\™XÝ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•H\™XÝ[ÛˆÚXÚHØ[ÛÜÈ\™H^YYÚ[ˆÛÚÚ[™ÈÝÛˆœ›ÛHHÜ——žHY˜][[Ø[È\™H^YY[ˆÛÝ[\‹XÛØÚÝÚ\ÙK[›\ÜÈ™]™\œÙHÛˆ]™[ˆ\È[˜X›YˆÙ]\ÈÈ[žHÜ[ÛˆÝ\ˆ[ˆ]]ÈÚ[›Ü˜ÙHHØ[\™XÝ[Ûˆ™YØ\™\ÜÈÙˆH™]™\œÙHÛˆ]™[‹——•\ÈÜ[ÛˆÚ[™H\ØX›YYˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OØ[\™XÝ[ÛŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜]]ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ØÝÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÝÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+]]ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÝ[\ˆÛØÚÝÚ\ÙHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛØÚÝÚ\ÙHŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OØ[\™XÝ[ÛŠØ[\™XÝ[ÛŽŽ]]ÊJNÂ‚ˆYˆH\ËO˜Y
+™^Y\ˆ‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+‘^Y\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+‘^Y\œÈŠNÂˆËÙY‹OÛÛ\H
+•H^Y\ˆÈ\ÙH
+[›\ÜÈ[Ü™HÜXÚYšXÈ^Y\ˆÙ][™ÜÈ\™HÜXÚYšYY
+Kˆ‚ˆËÈ•\È˜[YHÝ™\œšY\È\š[Y]\ˆ[™[™š[^Y\œË]›ÝHÝ\Ü^Y\œËˆŠNÂˆY‹O›Z[ˆHÈËÈH[š\š]Y˜][ÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+™Y˜][ŠJNÈËÈÝ™\œšYHX™[›Üˆ][HˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒHŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊHŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÌJNÂ‚ˆYˆH\ËO˜Y
+™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×Ü›Ù‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’ZYÚÈ›ÙŠNÂˆY‹OÛÛ\H
+‘\Ý[˜ÙHÙˆH›Þž›H\ÈHÝÙ\ˆ›Ùˆ‚ˆ•\ÙY›ÜˆÛÛ\Ú[Ûˆ]›ÚY[˜ÙH[ˆžK[Øš™XÝš[[™ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×ÛY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’ZYÚÈYŠNÂˆY‹OÛÛ\H
+‘\Ý[˜ÙHÙˆH›Þž›H\ÈHYˆ‚ˆ•\ÙY›ÜˆÛÛ\Ú[Ûˆ]›ÚY[˜ÙH[ˆžK[Øš™XÝš[[™ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+™^Y\—ØÛX\˜[˜ÙWÜ˜Y]\È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”˜Y]\ÈŠNÂˆY‹OÛÛ\H
+ÛX\˜[˜ÙH˜Y]\È\›Ý[™^Y\‹ˆ\ÙY›ÜˆÛÛ\Ú[Ûˆ]›ÚY[˜ÙH[ˆžK[Øš™XÝš[[™ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÚZYÚ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“›Þž›HZYÚŠNÂˆY‹OÛÛ\H
+•HZYÚÙˆ›Þž›H\ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹JJNÂ‚ˆYˆH\ËO˜Y
+˜™YÛY\ÚÛZ[ˆ‹ÛÔÚ[
+NÂˆY‹O›X™[H
+™YY\ÚZ[ˆŠNÂˆY‹OÛÛ\H
+ˆ•\ÈÜ[ÛˆÙ]ÈHZ[ˆÚ[›ÜˆH[ÝÙY™YY\Ú\™XKˆYHÈH›Ø™IÜÈHÙ™œÙ][ÜÝš[\œÈ\™H[˜X›HÈ›Ø™HH‚ˆ™[\™H™YˆÈ[œÝ\™HH›Ø™HÚ[Ù\È›ÝÛÈÝ]ÚYHH™Y\™XKHZ[š[][H[™X^[][HÚ[ÈÙˆH™YY\ÚÚÝ[™H‚ˆœÙ]\›ÜšX][KˆÛ˜\XZÙ\ˆÜ˜ØH[œÝ\™\È]Y\]™WØ™YÛY\ÚÛZ[‹ØY\]™WØ™YÛY\ÚÛX^˜[Y\ÈÈ›Ý^ÙYY\ÙHZ[‹ÛX^‚ˆœÚ[Ëˆ\È[™›Ü›X][ÛˆØ[ˆ\ÝX[H™HØZ[™Yœ›ÛH[Ý\ˆš[\ˆX[Y˜XÝ\™\‹ˆHY˜][Ù][™È\È
+NNNNNKNNNNNJKÚXÚ‚ˆ›YX[œÈ\™H\™H›È[Z]Ë\È[ÝÚ[™È›Øš[™ÈXÜ›ÜÜÈH[\™H™YˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+NNNNNKNNNNNJJJNÂ‚ˆYˆH\ËO˜Y
+˜™YÛY\ÚÛX^‹ÛÔÚ[
+NÂˆY‹O›X™[H
+™YY\ÚX^ŠNÂˆY‹OÛÛ\H
+ˆ•\ÈÜ[ÛˆÙ]ÈHX^Ú[›ÜˆH[ÝÙY™YY\Ú\™XKˆYHÈH›Ø™IÜÈHÙ™œÙ][ÜÝš[\œÈ\™H[˜X›HÈ›Ø™HH‚ˆ™[\™H™YˆÈ[œÝ\™HH›Ø™HÚ[Ù\È›ÝÛÈÝ]ÚYHH™Y\™XKHZ[š[][H[™X^[][HÚ[ÈÙˆH™YY\ÚÚÝ[™H‚ˆœÙ]\›ÜšX][KˆÛ˜\XZÙ\—ÓÜ˜ØH[œÝ\™\È]Y\]™WØ™YÛY\ÚÛZ[‹ØY\]™WØ™YÛY\ÚÛX^˜[Y\ÈÈ›Ý^ÙYY\ÙHZ[‹ÛX^‚ˆœÚ[Ëˆ\È[™›Ü›X][ÛˆØ[ˆ\ÝX[H™HØZ[™Yœ›ÛH[Ý\ˆš[\ˆX[Y˜XÝ\™\‹ˆHY˜][Ù][™È\È
+NNNNKNNNNJKÚXÚ‚ˆ›YX[œÈ\™H\™H›È[Z]Ë\È[ÝÚ[™È›Øš[™ÈXÜ›ÜÜÈH[\™H™YˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+NNNNKNNNNJJJNÂ‚ˆYˆH\ËO˜Y
+˜™YÛY\ÚÜ›Ø™WÙ\Ý[˜ÙH‹ÛÔÚ[
+NÂˆY‹O›X™[H
+”›Ø™HÚ[\Ý[˜ÙHŠNÂˆY‹OÛÛ\H
+•\ÈÜ[ÛˆÙ]ÈH™Y™\œ™Y\Ý[˜ÙH™]ÙY[ˆ›Ø™HÚ[È
+ÜšYÚ^™JH›ÜˆH[™H\™XÝ[ÛœËÚ]H‚ˆ™Y˜][™Z[™ÈL[H›Üˆ›Ý[™KˆŠNÂˆY‹O›Z[ˆHÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+LL
+JJNÂ‚ˆYˆH\ËO˜Y
+˜Y\]™WØ™YÛY\ÚÛX\™Ú[ˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Y\ÚX\™Ú[ˆŠNÂˆY‹OÛÛ\H
+•\ÈÜ[Ûˆ]\›Z[™\ÈHY][Û˜[\Ý[˜ÙHžHÚXÚHY\]™H™YY\Ú\™XHÚÝ[™H^[™Y[ˆHH\™XÝ[ÛœËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+™^Y\—ØÛÛÝ\ˆ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘^Y\ˆÛÛÜˆŠNÂˆY‹OÛÛ\H
+“Û›H\ÙY\ÈHš\ÝX[[ÛˆRKˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ˜ÛÛÜŽÂˆËÈ[\HÝš[™ÈYX[œÈ›ÈÛÛÜˆ\ÜÚYÛ™YY]‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈˆˆJNÂ‚ˆYˆH\ËO˜Y
+™^Y\—ÛÙ™œÙ]‹ÛÔÚ[ÊNÂˆY‹O›X™[H
+‘^Y\ˆÙ™œÙ]ŠNÂˆËÙY‹OÛÛ\H
+’Yˆ[Ý\ˆš\›]Ø\™HÙ\Û‰Ý[™HH^Y\ˆ\ÜXÙ[Y[[ÝH™YYHËXÛÙH‚ˆËÈÈZÙH][ÈXØÛÝ[ˆ\ÈÜ[Ûˆ]È[ÝHÜXÚYžHH\ÜXÙ[Y[ÙˆXXÚ^Y\ˆ‚ˆËÈÚ]™\ÜXÝÈHš\œÝÛ™Kˆ]^XÝÈÜÚ]]™HÛÛÜ™[˜]\È
+^HÚ[™HÝX˜XÝY‚ˆËÈ™œ›ÛHHHÛÛÜ™[˜]JKˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[ÈÈ™XÌ™
+
+HJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ù›Ý×Ü˜][È‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+‘›ÝÈ˜][ÈŠNÂˆY‹OÛÛ\H
+•HX]\šX[X^H]™H›Û[Y]šXÈÚ[™ÙHY\ˆÝÚ]Ú[™È™]ÙY[ˆ[Û[ˆ[™Üž\Ý[[™HÝ]\Ëˆ‚ˆ•\ÈÙ][™ÈÚ[™Ù\È[^\Ú[Ûˆ›ÝÈÙˆ\Èš[[Y[[ˆËXÛÙH›ÜÜ[Û˜[Kˆ‚ˆ•H™XÛÛ[Y[™Y˜[YH˜[™ÙH\È™]ÙY[ˆŽMH[™KŒKˆ‚ˆ–[ÝHX^H™HX›HÈ[™H\È˜[YHÈÙ]HšXÙH›]Ý\™˜XÙHYˆ\™H\ÈÛYÚÝ™\™›ÝÈÜˆ[™\™›ÝËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈKˆJNÂ‚ˆYˆH\ËO˜Y
+œš[Ù›Ý×Ü˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘›ÝÈ˜][ÈŠNÂˆY‹OÛÛ\H
+•HX]\šX[X^H]™H›Û[Y]šXÈÚ[™ÙHY\ˆÝÚ]Ú[™È™]ÙY[ˆ[Û[ˆ[™Üž\Ý[[™HÝ]\Ëˆ‚ˆ•\ÈÙ][™ÈÚ[™Ù\È[^\Ú[Ûˆ›ÝÈÙˆ\Èš[[Y[[ˆËXÛÙH›ÜÜ[Û˜[Kˆ‚ˆ•H™XÛÛ[Y[™Y˜[YH˜[™ÙH\È™]ÙY[ˆŽMH[™KŒKˆ‚ˆ–[ÝHX^H™HX›HÈ[™H\È˜[YHÈÙ]HšXÙH›]Ý\™˜XÙHYˆ\™H\ÈÛYÚÝ™\™›ÝÈÜˆ[™\™›ÝËˆ‚ˆ——•Hš[˜[Øš™XÝ›ÝÈ˜][È\È\È˜[YH][\YYžHHš[[Y[›ÝÈ˜][ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›X^HŽÂˆY‹O›Z[ˆHŒNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÜ™\ÜÝ\™WØY˜[˜ÙH‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘[˜X›H™\ÜÝ\™HY˜[˜ÙHŠNÂˆY‹OÛÛ\H
+‘[˜X›H™\ÜÝ\™HY˜[˜ÙK]]ÈØ[Xœ˜][Ûˆ™\Ý[Ú[™HÝ™\Üš][ˆÛ˜ÙH[˜X›YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+œ™\ÜÝ\™WØY˜[˜ÙH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”™\ÜÝ\™HY˜[˜ÙHŠNÂˆY‹OÛÛ\H
+”™\ÜÝ\™HY˜[˜ÙH
+Û\\ŠHRÐH[™X\ˆY˜[˜ÙH˜XÝÜˆ
+X\›[ŠKˆŠNÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈŒˆJNÂˆˆËÈÜ˜ØNˆY\]™H™\ÜÝ\™HY˜[˜ÙHÜ[Ûˆ[™Ø[Xœ˜][Ûˆ˜[Y\ÂˆYˆH\ËO˜Y
+˜Y\]™WÜ™\ÜÝ\™WØY˜[˜ÙH‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘[˜X›HY\]™H™\ÜÝ\™HY˜[˜ÙH
+™]JHŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+•Ú][˜Ü™X\Ú[™Èš[ÜYYÈ
+[™[˜ÙH[˜Ü™X\Ú[™È›Û[Y]šXÈ›ÝÈ›ÝYÚH›Þž›JH[™[˜Ü™X\Ú[™ÈXØÙ[\˜][ÛœË‚ˆš]\È™Y[ˆØœÙ\™Y]HY™™XÝ]™HH˜[YH\XØ[HXÜ™X\Ù\Ëˆ‚ˆ•\ÈYX[œÈ]HÚ[™ÛHH˜[YH\È›Ý[Ø^\ÈL	HÜ[X[›Üˆ[™X]\™\È[™HÛÛ\›ÛZ\ÙH˜[YH\È\ÝX[H\ÙY‚ˆ]Ù\È›ÝØ]\ÙHÛÈ]XÚ[Ú[™ÈÛˆ™X]\™\ÈÚ]ÝÙ\ˆ›ÝÈÜYY[™XØÙ[\˜][ÛœÈÚ[H[ÛÈ›ÝØ]\Ú[™ÈØ\ÈÛˆ˜\Ý\ˆ™X]\™\Ë——ˆ‚ˆ•\È™X]\™HZ[\ÈÈY™\ÜÈ\È[Z]][ÛˆžH[Ù[[™ÈH™\ÜÛœÙHÙˆ[Ý\ˆš[\‰ÜÈ^\Ú[ÛˆÞ\Ý[H\[™[™È‚ˆ›ÛˆH›Û[Y]šXÈ›ÝÈÜYY[™XØÙ[\˜][Ûˆ]\Èš[[™È]ˆ[\›˜[K]Ù[™\˜]\ÈHš]Y[Ù[]Ø[ˆ^˜\Û]HH™YYY™\ÜÝ\™H‚ˆ˜Y˜[˜ÙH›Üˆ[žHÚ]™[ˆ›Û[Y]šXÈ›ÝÈÜYY[™XØÙ[\˜][Û‹ÚXÚ\È[ˆ[Z]YÈHš[\ˆ\[™[™ÈÛˆHÝ\œ™[š[ÛÛ™][ÛœË——ˆ‚ˆ•Ú[ˆ[˜X›YH™\ÜÝ\™HY˜[˜ÙH˜[YHX›Ý™H\ÈÝ™\œšY[‹ˆÝÙ]™\‹H™X\ÛÛ˜X›HY˜][˜[YHX›Ý™H\È‚ˆœÝ›Û™ÛH™XÛÛ[Y[™YÈXÝ\ÈH˜[˜XÚÈ[™›ÜˆÚ[ˆÛÛÚ[™Ú[™Ë——ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÈ˜[ÙHJNÂ‚ˆËÈÜ˜ØNˆY\]™H™\ÜÝ\™HY˜[˜ÙHÜ[Ûˆ[™Ø[Xœ˜][Ûˆ˜[Y\ÂˆYˆH\ËO˜Y
+˜Y\]™WÜ™\ÜÝ\™WØY˜[˜ÙWÛ[Ù[‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+Y\]™H™\ÜÝ\™HY˜[˜ÙHYX\Ý\™[Y[È
+™]JHŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+YÙ]ÈÙˆ™\ÜÝ\™HY˜[˜ÙH
+JH˜[Y\ËH›Û[Y]šXÈ›ÝÈÜYYÈ[™XØÙ[\˜][ÛœÈ^HÙ\™HYX\Ý\™Y]Ù\\˜]YžHHÛÛ[XKˆ‚ˆ“Û™HÙ]Ùˆ˜[Y\È\ˆ[™Kˆ›Üˆ^[\Wˆ‚ˆŒŒËŽM‹ÌŒŒÌËËŽM‹LŒŒŽKËŽLKÌŒŒ‹ËŽLKL—ˆ‚ˆ’ÝÈÈØ[Xœ˜]N—ˆ‚ˆŒKˆ[ˆH™\ÜÝ\™HY˜[˜ÙH\Ý›Üˆ]X\ÝÈÜYYÈ\ˆXØÙ[\˜][Ûˆ˜[YKˆ]\È™XÛÛ[Y[™Y]H\Ý\È[ˆ‚ˆ™›Üˆ]X\ÝHÜYYÙˆH^\›˜[\š[Y]\œËHÜYYÙˆH[\›˜[\š[Y]\œÈ[™H˜\Ý\Ý™X]\™H‚ˆœš[ÜYY[ˆ[Ý\ˆ›Ùš[H
+\ÝX[H]ÈHÜ\œÙHÜˆÛÛY[™š[
+Kˆ[ˆ[ˆ[H›ÜˆHØ[YHÜYYÈ›ÜˆHÛÝÙ\Ý[™˜\Ý\Ýš[XØÙ[\˜][ÛœË‚ˆ˜[™›È˜\Ý\ˆ[ˆH™XÛÛ[Y[™YX^[][HXØÙ[\˜][Ûˆ\ÈÚ]™[ˆžHHÛ\\ˆ[œ]Ú\\—ˆ‚ˆŒ‹ˆZÙH›ÝHÙˆHÜ[X[H˜[YH›ÜˆXXÚ›Û[Y]šXÈ›ÝÈÜYY[™XØÙ[\˜][Û‹ˆ[ÝHØ[ˆš[™H›ÝÈ[X™\ˆžHÙ[XÝ[™È‚ˆ™›ÝÈœ›ÛHHÛÛÜˆØÚ[YH›ÜÝÛˆ[™[Ý™HHÜš^›Û[ÛY\ˆÝ™\ˆHH]\›ˆ[™\ËˆH[X™\ˆÚÝ[™Hš\ÚX›H‚ˆ˜]H›ÝÛHÙˆHYÙKˆHYX[H˜[YHÚÝ[™HXÜ™X\Ú[™ÈHYÚ\ˆH›Û[Y]šXÈ›ÝÈ\Ëˆ‚ˆ’Yˆ]\È›ÝÛÛ™š\›H][Ý\ˆ^Y\ˆ\È[˜Ý[Ûš[™ÈÛÜœ™XÝKˆHÛÝÙ\ˆ[™Ú]\ÜÈXØÙ[\˜][Ûˆ[ÝHš[‚ˆH\™Ù\ˆH˜[™ÙHÙˆXØÙ\X›HH˜[Y\ËˆYˆ›ÈY™™\™[˜ÙH\Èš\ÚX›K\ÙHHH˜[YHœ›ÛHH˜\Ý\ˆ\Ýˆ‚ˆŒËˆ[\ˆHš\]ÈÙˆH˜[Y\Ë›ÝÈ[™XØÙ[\˜][ÛœÈ[ˆH^›Þ\™H[™Ø]™H[Ý\ˆš[[Y[›Ùš[HŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆËÙY‹O™ÝZWÙ›YÜÈHœÙ\šX[^™YŽÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHMNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈŒŒŸJNÂˆˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆYˆH\ËO˜Y
+˜Y\]™WÜ™\ÜÝ\™WØY˜[˜ÙWÛÝ™\š[™ÜÈ‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘[˜X›HY\]™H™\ÜÝ\™HY˜[˜ÙH›ÜˆÝ™\š[™ÜÈ
+™]JHŠNÂˆY‹OÛÛ\H
+‘[˜X›HY\]™HH›ÜˆÝ™\š[™ÜÈ\ÈÙ[\ÈÚ[ˆ›ÝÈÚ[™Ù\ÈÚ][ˆHØ[YH™X]\™Kˆ\È\È[ˆ^\š[Y[[Ü[Û‹‚ˆ˜\ÈYˆHH›Ùš[H\È›ÝÙ]XØÝ\˜][K]Ú[Ø]\ÙH[šY›Ü›Z]H\ÜÝY\ÈÛˆH^\›˜[Ý\™˜XÙ\È™Y›Ü™H[™Y\ˆÝ™\š[™ÜË—ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+˜Y\]™WÜ™\ÜÝ\™WØY˜[˜ÙWØœšYÙ\È‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”™\ÜÝ\™HY˜[˜ÙH›ÜˆœšYÙ\ÈŠNÂˆY‹OÛÛ\H
+”™\ÜÝ\™HY˜[˜ÙH˜[YH›ÜˆœšYÙ\ËˆÙ]ÈÈ\ØX›K——ˆ‚ˆHÝÙ\ˆH˜[YHÚ[ˆš[[™ÈœšYÙ\È[È™YXÙHH\X\˜[˜ÙHÙˆÛYÚ[™\ˆ^\Ú[Ûˆ[[YYX][HY\ˆœšYÙ\Ëˆ‚ˆ•\È\ÈØ]\ÙYžHH™\ÜÝ\™H›Ü[ˆH›Þž›HÚ[ˆš[[™È[ˆHZ\ˆ[™HÝÙ\ˆH[ÈÛÝ[\˜XÝ\ËˆŠNÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈŒJNÂ‚ˆYˆH\ËO˜Y
+›[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+‘Y˜][ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘Y˜][[™HÚYYˆÝ\ˆ[™HÚYÈ\™HÙ]ÈˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œ™YXÙWÙ˜[—ÜÝÜÜÝ\Ùœ™\H‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+’ÙY\˜[ˆ[Ø^\ÈÛˆŠNÂˆY‹OÛÛ\H
+‘[˜X›[™È\ÈÙ][™ÈYX[œÈ]H\ÛÛÛ[™È˜[ˆÚ[™]™\ˆÝÜÛÛ\][H‚ˆ˜[™Ú[[ˆ]X\Ý]Z[š[][HÜYYÈ™YXÙHHœ™\]Y[˜ÞHÙˆÝ\[™È[™ÝÜ[™ËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+™ÛÜÛÝ×ÙÝÛ—ÛÝ]\—ÝØ[‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘Û‰ÝÛÝÈÝÛˆÝ]\ˆØ[ÈŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y\ÈÙ][™ÈÚ[[œÝ\™H^\›˜[\š[Y]\œÈ\™H›ÝÛÝÙYÝÛˆÈYY]HZ[š[][H^Y\ˆ[YKˆ‚ˆ•\È\È\XÝ[\›H[[[ˆH™[ÝÈØÙ[˜\š[ÜÎ—ˆ‚ˆŒKˆÈ]›ÚYÚ[™Ù\È[ˆÚ[™HÚ[ˆš[[™ÈÛÜÜÞHš[[Y[×ˆ‚ˆŒ‹ˆÈ]›ÚYÚ[™Ù\È[ˆ^\›˜[Ø[ÜYYÚXÚX^HÜ™X]HÛYÚØ[\Y˜XÝÈ]\X\ˆZÙHˆ˜[™[™×ˆ‚ˆŒËˆÈ]›ÚYš[[™È]ÜYYÈÚXÚØ]\ÙH‘\È
+š[™H\Y˜XÝÊHÛˆH^\›˜[Ø[ÈŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+™˜[—ØÛÛÛ[™×Û^Y\—Ý[YH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“^Y\ˆ[YHŠNÂˆY‹OÛÛ\H
+”\ÛÛÛ[™È˜[ˆÚ[™H[˜X›Y›Üˆ^Y\œÈÙˆÚXÚ\Ý[X]Y[YH\ÈÚÜ\ˆ[ˆ\È˜[YKˆ‚ˆ‘˜[ˆÜYY\È[\œÛ]Y™]ÙY[ˆHZ[š[][H[™X^[][H˜[ˆÜYYÈXØÛÜ™[™ÈÈ^Y\ˆš[[™È[YKˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÞÈŒŒˆJNÂ‚ˆYˆH\ËO˜Y
+™Y˜][Ùš[[Y[ØÛÛÝ\ˆ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘Y˜][ÛÛÜˆŠNÂˆY‹OÛÛ\H
+‘Y˜][š[[Y[ÛÛÜ‹—ˆ‚ˆ”šYÚÛXÚÈÈ™\Ù]˜[YHÈÞ\Ý[HY˜][ˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ˜ÛÛÜŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈˆŸJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÛÝ\ˆ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+ÛÛÜˆŠNÂˆY‹OÛÛ\H
+“Û›H\ÙY\ÈHš\ÝX[[ÛˆRKˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ˜ÛÛÜŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈˆÑŒÍMHˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Û][WØÛÛÜœÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘š[[Y[][HÛÛÜœÈŠNÂˆY‹OÛÛ\H
+”Ù\šX[^™Yš[[Y[ÛÛÜˆÙ\]Y[˜ÙKˆ][\HÛÛÜœÈ\™HÙ\\˜]YžH	ß	ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈˆˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÛÝ\—Û[ÙH‹ÛÒ[ÊNÂˆY‹O›X™[H
+‘š[[Y[ÛÛÜˆ\Ü^H[ÙHŠNÂˆY‹OÛÛ\H
+‘š[[Y[ÛÛÜˆ\Ü^H[ÙNˆ›ÜˆÜ]ÛÛÜœËH›ÜˆÜ˜YY[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈJNÂ‚ˆYˆH\ËO˜Y
+[XŒ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+œÛX[[XˆŠNÂˆY‹OÛÛ\H
+™š\œÝÛX[[XˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÞÈˆŸJNÂ‚ˆYˆH\ËO˜Y
+[XŒH‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+˜šYÈ[XˆŠNÂˆY‹OÛÛ\H
+™š\œÝšYÈ[XˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÞÈˆŸJNÂ‚ˆËÈÂˆYˆH\ËO˜Y
+™š[[Y[Û›Ý\È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+‘š[[Y[›Ý\ÈŠNÂˆY‹OÛÛ\H
+–[ÝHØ[ˆ][Ý\ˆ›Ý\È™YØ\™[™ÈHš[[Y[\™KˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLÎÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈˆˆJNÂ‚ˆËØ˜œÂˆYˆH\ËO˜Y
+œ™\]Z\™YÛ›Þž›WÒÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+”™\]Z\™Y›Þž›HÈŠNÂˆY‹OÛÛ\H
+“Z[š[][HÈÙˆ›Þž›H™\]Z\™YÈš[Hš[[Y[ˆ™\›ÈYX[œÈ›ÈÚXÚÚ[™ÈÙˆ›Þž›IÜÈËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÛX^Ý›Û[Y]šX×ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“X^›Û[Y]šXÈÜYYŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™ÈÝ[™È›ÜˆÝÈ]XÚ›Û[YHÙˆš[[Y[Ø[ˆ™HY[Y[™^YY\ˆÙXÛÛ™ˆ‚ˆ”š[[™ÈÜYY\È[Z]YžHX^›Û[Y]šXÈÜYY[ˆØ\ÙHÙˆÛÈYÚ[™[œ™X\ÛÛ˜X›HÜYYÙ][™Ëˆ‚ˆØ[‰Ý™H™\›ËˆŠNÂˆY‹OœÚY]^HN›[p¬ËÜÈŽÂKËÈÝXšXÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈ‹ˆJNÂ‚ˆYˆH\ËO˜Y
+›XXÚ[™WÛØYÙš[[Y[Ý[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘š[[Y[ØY[YHŠNÂˆY‹OÛÛ\H
+•[YHÈØY™]Èš[[Y[Ú[ˆÝÚ]Úš[[Y[ˆ]	ÜÈ\ÝX[H\XØX›H›ÜˆÚ[™ÛKY^Y\ˆ][K[X]\šX[XXÚ[™\Ëˆ‚ˆ‘›ÜˆÛÛÚ[™Ù\œÈÜˆ][K]ÛÛXXÚ[™\Ë]	ÜÈ\XØ[Hˆ›ÜˆÝ]\ÝXÜÈÛ›KˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+›XXÚ[™WÝ[›ØYÙš[[Y[Ý[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘š[[Y[[›ØY[YHŠNÂˆY‹OÛÛ\H
+•[YHÈ[›ØYÛš[[Y[Ú[ˆÝÚ]Úš[[Y[ˆ]	ÜÈ\ÝX[H\XØX›H›ÜˆÚ[™ÛKY^Y\ˆ][K[X]\šX[XXÚ[™\Ëˆ‚ˆ‘›ÜˆÛÛÚ[™Ù\œÈÜˆ][K]ÛÛXXÚ[™\Ë]	ÜÈ\XØ[Hˆ›ÜˆÝ]\ÝXÜÈÛ›KˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+›XXÚ[™WÝÛÛØÚ[™ÙWÝ[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÛÛÚ[™ÙH[YHŠNÂˆY‹OÛÛ\H
+•[YHZÙ[ˆÈÝÚ]ÚÛÛËˆ]	ÜÈ\ÝX[H\XØX›H›ÜˆÛÛÚ[™Ù\œÈÜˆ][K]ÛÛXXÚ[™\Ëˆ‚ˆ‘›ÜˆÚ[™ÛKY^Y\ˆ][K[X]\šX[XXÚ[™\Ë]	ÜÈ\XØ[Hˆ›ÜˆÝ]\ÝXÜÈÛ›KˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈˆJNÂ‚ˆYˆH\ËO˜Y
+ÛÛØÚ[™ÙWÝ[\˜]\™WÝØZ]‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•ØZ]›ÜˆH[\\˜]\™HÚ[ˆÚ[™Ú[™ÈÛÛÈŠNÂˆY‹OÛÛ\H
+’]Ú[\ÙHHLLH[œÝXYÙˆLLÝ\™Ù]HY\ˆÚ[™Ú[™ÈÛÛÈYˆ\È\ÈÙ]ÈYHŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚‚ˆYˆH\ËO˜Y
+™š[[Y[ÙX[Y]\ˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+‘X[Y]\ˆŠNÂˆY‹OÛÛ\H
+‘š[[Y[X[Y]\ˆ\È\ÙYÈØ[Ý[]H^\Ú[Ûˆ[ˆËXÛÙKÛÈ]\È[\Ü[[™ÚÝ[™HXØÝ\˜]KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈKÍHJNÂ‚ˆÊ‚ˆ\™ÙH›Ü›X]š[\œÈÚ]š[›Û[Y\È[ˆHÜ™\ˆÙˆ[WŒÈÙ[™\˜[H\ÙH[]È›Üˆš[[™Ë‚ˆHÝ™\˜[XÚ\È™\žHÚ[Z[\ˆÈ‘Hš[[™Ëˆˆ]\È‘Hš[[™Ë][œÝXYÙˆš[[Y[Ë]\Ù\È[]Ë‚‚ˆHY™™\™[˜ÙH\™H\È]Ú\™Hš[[Y[È]™HHš[[Y[ÙX[Y]\ˆ]\È\ÙYÈØ[Ý[]HˆH›Û[YHÙˆš[[Y[[™Ù\ÝY[]È]™HH\XÝ[\ˆ›Ý×ØÛÙY™šXÚY[]\È[\\šXØ[Hˆ]š\ÙY›Üˆ]\XÝ[\ˆ[]‚‚ˆ[]Ù›Ý×ØÛÙY™šXÚY[\È˜\ÚXØ[HHYX\Ý\™HÙˆHXÚÚ[™È[œÚ]HÙˆH\XÝ[\ˆ[]‚ˆÚ\KX]\šX[[™[œÚ]HÙˆ[ˆ[™]šYX[[]Ú[]\›Z[™HHXÚÚ[™È[œÚ]H[™ˆHÛ›H[™È]X]\œÈ›ÜˆÙš[[™È\ÈÝÈ]XÚÙˆ][]X]\šX[\È^YYžHˆÛ™H\›ˆÙˆÚ]]™\ˆ™YY[™ÈYZØ[š\ÛKÙÙX\ˆ[Ý\ˆš[\ˆ\Ù\Ëˆ[ÝHØ[ˆ[\\šXØ[H\š]™H]ˆ›Üˆ[Ý\ˆÝÛˆ[]È›ÜˆH\XÝ[\ˆš[\ˆ[Ù[‚‚ˆÙH\™H˜[œÛ][™ÈH[]Ù›Ý×ØÛÙY™šXÚY[[Èš[[Y[ÙX[Y]\ˆÛÈ]]™\ž][™ÈÛÜšÜÈ\ÝZÙH]ˆÙ\È[™XYHÚ]™\žHZ[›ÜˆY\ÝY[Ë‚‚ˆš[[Y[ÙX[Y]\ˆHÜ\
+
+
+ˆ[]Ù›Ý×ØÛÙY™šXÚY[
+HÈH
+B‚ˆÜ\\ÝXZÙ\ÈH™[][ÛœÚ\™]ÙY[ˆ›Ý×ØÛÙY™šXÚY[[™›Û[YH[™X\‹‚‚ˆYÚ\ˆXÚÚ[™È[œÚ]HOˆ[Ü™HX]\šX[^YYžHÚ[™ÛH\›ˆOˆYÚ\ˆ[]Ù›Ý×ØÛÙY™šXÚY[Oˆ™X]Y\ÈYˆHš[[Y[Ùˆ\™Ù\ˆX[Y]\ˆ\È™Z[™È\ÙYˆ[Ý\ˆØ[Ý[][ÛœÈ™[XZ[ˆHØ[YH›ÜˆÛXÚ[™Ë‚ˆ
+‹Â‚ˆYˆH\ËO˜Y
+œ[]Ù›Ý×ØÛÙY™šXÚY[‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”[]›ÝÈÛÙY™šXÚY[ŠNÂˆY‹OÛÛ\H
+”[]›ÝÈÛÙY™šXÚY[\È[\\šXØ[H\š]™Y[™[ÝÜÈ›Üˆ›Û[YHØ[Ý[][Ûˆ›Üˆ[]š[\œË——’[\›˜[H]\ÈÛÛ™\YÈš[[Y[ÙX[Y]\‹ˆ[Ý\ˆ›Û[YHØ[Ý[][ÛœÈ™[XZ[ˆHØ[YK——™š[[Y[ÙX[Y]\ˆHÜ\
+
+
+ˆ[]Ù›Ý×ØÛÙY™šXÚY[
+HÈH
+HŠNÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÞÈMMÈJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÚš[šÈ‹ÛÔ\˜Ù[ÊNÂˆY‹O›X™[H
+”Úš[šØYÙH
+JHŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+‘[\ˆHÚš[šØYÙH\˜Ù[YÙH]Hš[[Y[Ú[Ù]Y\ˆÛÛÛ[™È
+M	HYˆ[ÝHYX\Ý\™HM[H[œÝXYÙˆL[JKˆ‚ˆˆH\Ú[™HØØ[Y[ˆHÈÛÛ\[œØ]Kˆ‚ˆˆÛ›HHš[[Y[\ÙY›ÜˆH\š[Y]\ˆ\ÈZÙ[ˆ[ÈXØÛÝ[ˆ‚ˆ—™HÝ\™HÈ[ÝÈ[›ÝYÚÜXÙH™]ÙY[ˆØš™XÝË\È\ÈÛÛ\[œØ][Ûˆ\ÈÛ™HY\ˆHÚXÚÜËˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹Oœ˜][×ÛÝ™\ˆHˆŽÂˆY‹O›Z[ˆHLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[ÞÈLJNÂˆˆYˆH\ËO˜Y
+™š[[Y[ÜÚš[šØYÙWØÛÛ\[œØ][Û—Þˆ‹ÛÔ\˜Ù[ÊNÂˆY‹O›X™[H
+”Úš[šØYÙH
+ŠHŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+‘[\ˆHÚš[šØYÙH\˜Ù[YÙH]Hš[[Y[Ú[Ù]Y\ˆÛÛÛ[™È
+M	HYˆ[ÝHYX\Ý\™HM[H[œÝXYÙˆL[JKˆ‚ˆˆH\Ú[™HØØ[Y[ˆˆÈÛÛ\[œØ]KˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹Oœ˜][×ÛÝ™\ˆHˆŽÂˆY‹O›Z[ˆHLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[ÞÈLJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÛØY[™×ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“ØY[™ÈÜYYŠNÂˆY‹OÛÛ\H
+”ÜYY\ÙY›ÜˆØY[™ÈHš[[Y[ÛˆHÚ\HÝÙ\‹ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈŽˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÛØY[™×ÜÜYYÜÝ\‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“ØY[™ÈÜYY]HÝ\ŠNÂˆY‹OÛÛ\H
+”ÜYY\ÙY]H™\žH™YÚ[›š[™ÈÙˆØY[™È\ÙKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈËˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ý[›ØY[™×ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•[›ØY[™ÈÜYYŠNÂˆY‹OÛÛ\H
+”ÜYY\ÙY›Üˆ[›ØY[™ÈHš[[Y[ÛˆHÚ\HÝÙ\ˆ
+Ù\È›ÝY™™XÝ‚ˆš[š]X[\Ùˆ[›ØY[™È\ÝY\ˆ˜[[Z[™ÊKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈLˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ý[›ØY[™×ÜÜYYÜÝ\‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•[›ØY[™ÈÜYY]HÝ\ŠNÂˆY‹OÛÛ\H
+”ÜYY\ÙY›Üˆ[›ØY[™ÈH\ÙˆHš[[Y[[[YYX][HY\ˆ˜[[Z[™ËˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈLˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÝÛÛÚ[™ÙWÙ[^H‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+‘[^HY\ˆ[›ØY[™ÈŠNÂˆY‹OÛÛ\H
+•[YHÈØZ]Y\ˆHš[[Y[\È[›ØYYˆ‚ˆ“X^H[ÈÙ]™[XX›HÛÛÚ[™Ù\ÈÚ]›^X›HX]\šX[È‚ˆ]X^H™YY[Ü™H[YHÈÚš[šÈÈÜšYÚ[˜[[Y[œÚ[ÛœËˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÛÛ[™×Û[Ý™\È‹ÛÒ[ÊNÂˆY‹O›X™[H
+“[X™\ˆÙˆÛÛÛ[™È[Ý™\ÈŠNÂˆY‹OÛÛ\H
+‘š[[Y[\ÈÛÛÛYžH™Z[™È[Ý™Y˜XÚÈ[™›Ü[ˆH‚ˆ˜ÛÛÛ[™ÈX™\ËˆÜXÚYžH\Ú\™Y[X™\ˆÙˆ\ÙH[Ý™\ËˆŠNÂˆY‹O›X^HÂˆY‹O›X^HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÝ[\[™×ÛØY[™×ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”Ý[\[™ÈØY[™ÈÜYYŠNÂˆY‹OÛÛ\H
+”ÜYY\ÙY›ÜˆÝ[\[™ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÝ[\[™×Ù\Ý[˜ÙH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”Ý[\[™È\Ý[˜ÙHYX\Ý\™Yœ›ÛHHÙ[\ˆÙˆHÛÛÛ[™ÈX™HŠNÂˆY‹OÛÛ\H
+’YˆÙ]È›Û‹^™\›È˜[YKš[[Y[\È[Ý™YÝØ\™H›Þž›H™]ÙY[ˆH[™]šYX[ÛÛÛ[™È[Ý™\È
+œÝ[\[™×ŠKˆ‚ˆ•\ÈÜ[ÛˆÛÛ™šYÝ\™\ÈÝÈÛ™È\È[Ý™[Y[ÚÝ[™H™Y›Ü™HHš[[Y[\È™]˜XÝYYØZ[‹ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÛÛ[™×Ú[š]X[ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”ÜYYÙˆHš\œÝÛÛÛ[™È[Ý™HŠNÂˆY‹OÛÛ\H
+ÛÛÛ[™È[Ý™\È\™HÜ˜YX[HXØÙ[\˜][™È™YÚ[›š[™È]\ÈÜYYˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈ‹ŒˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÛZ[š[X[Ü\™ÙWÛÛ—ÝÚ\WÝÝÙ\ˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“Z[š[X[\™ÙHÛˆÚ\HÝÙ\ˆŠNÂˆY‹OÛÛ\H
+Y\ˆHÛÛÚ[™ÙKH^XÝÜÚ][ÛˆÙˆH™]ÛHØYYš[[Y[[œÚYH‚ˆH›Þž›HX^H›Ý™HÛ›ÝÛ‹[™Hš[[Y[™\ÜÝ\™H\ÈZÙ[H›ÝY]ÝX›Kˆ‚ˆ™Y›Ü™H\™Ú[™ÈHš[XY[È[ˆ[™š[ÜˆHØXÜšYšXÚX[Øš™XÝÛ˜\XZÙ\ˆÜ˜ØHÚ[[Ø^\Èš[YH‚ˆ\È[[Ý[ÙˆX]\šX[[ÈHÚ\HÝÙ\ˆÈ›ÙXÙHÝXØÙ\ÜÚ]™H[™š[ÜˆØXÜšYšXÚX[Øš™XÝ^\Ú[ÛœÈ™[XX›KˆŠNÂˆY‹OœÚY]^HN›[p¬ÈŽÂKËÈÝXšXÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈMKˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÛÛ[™×Ùš[˜[ÜÜYY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”ÜYYÙˆH\ÝÛÛÛ[™È[Ý™HŠNÂˆY‹OÛÛ\H
+ÛÛÛ[™È[Ý™\È\™HÜ˜YX[HXØÙ[\˜][™ÈÝØ\™È\ÈÜYYˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈËJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ü˜[[Z[™×Ü\˜[Y]\œÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”˜[[Z[™È\˜[Y]\œÈŠNÂˆY‹OÛÛ\H
+•\ÈÝš[™È\ÈY]YžH˜[[Z[™ÑX[ÙÈ[™ÛÛZ[œÈ˜[[Z[™ÈÜXÚYšXÈ\˜[Y]\œËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈŒLŒL‹ˆ‹ŽËŒˆËˆËŽHŒˆÈKKŽHLŒ‚ˆˆŒH‹ˆH‹ŽŽMHËŽKHŒÈKŽMHKÈ‹HL‹ŽMHËˆËHËˆËŽMHËˆHËˆŽMHËˆˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Û][]ÛÛÜ˜[[Z[™È‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+‘[˜X›H˜[[Z[™È›Üˆ][K]ÛÛÙ]\ÈŠNÂˆY‹OÛÛ\H
+”\™›Ü›H˜[[Z[™ÈÚ[ˆ\Ú[™È][K]ÛÛš[\ˆ
+K™KˆÚ[ˆH	ÔÚ[™ÛH^Y\ˆ][[X]\šX[	È[ˆš[\ˆÙ][™ÜÈ\È[˜ÚXÚÙY
+Kˆ‚ˆ•Ú[ˆÚXÚÙYHÛX[[[Ý[Ùˆš[[Y[\È˜\YH^YYÛˆHÚ\HÝÙ\ˆ\Ý™Y›Ü™HHÛÛÚ[™ÙKˆ‚ˆ•\ÈÜ[Ûˆ\ÈÛ›H\ÙYÚ[ˆHÚ\HÝÙ\ˆ\È[˜X›YˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Û][]ÛÛÜ˜[[Z[™×Ý›Û[YH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“][K]ÛÛ˜[[Z[™È›Û[YHŠNÂˆY‹OÛÛ\H
+•H›Û[YHÈ™H˜[[YY™Y›Ü™HHÛÛÚ[™ÙKˆŠNÂˆY‹OœÚY]^HN›[p¬ÈŽÂKËÈÝXšXÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈLˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Û][]ÛÛÜ˜[[Z[™×Ù›ÝÈ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+“][K]ÛÛ˜[[Z[™È›ÝÈŠNÂˆY‹OÛÛ\H
+‘›ÝÈ\ÙY›Üˆ˜[[Z[™ÈHš[[Y[™Y›Ü™HHÛÛÚ[™ÙKˆŠNÂˆY‹OœÚY]^HN›[p¬ËÜÈŽÂKËÈÝXšXÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈLˆJNÂˆˆYˆH\ËO˜Y
+™š[[Y[Ù[œÚ]H‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+‘[œÚ]HŠNÂˆY‹OÛÛ\H
+‘š[[Y[[œÚ]Kˆ›ÜˆÝ]\ÝXÜÈÛ›KˆŠNÂˆY‹OœÚY]^HN™ËØÛp¬ÈŽÂKËÈÜ˜[\È\ˆÝXšXÈZ[[Y]\‹Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ý\H‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+•\HŠNÂˆY‹OÛÛ\H
+•HX]\šX[\HÙˆš[[Y[ˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ™—Ù[[WÛÜ[ŽÂˆY‹O™ÝZWÙ›YÜÈHœÚÝ×Ý˜[YHŽÂ‚ˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊP”ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊP”ËQÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊTÐHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊTÐKPY\›ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ•“ÒŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ÕÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‘UHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‘“VŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ’TÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KQÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”M‹PÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”LLKPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ËPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ÕÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”UPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”UÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”UËPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”UËPÑŒLŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”UËQÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KPQT“ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”PÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”QÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”KQÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ËPÑˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”Ð”ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ•HŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈ”HˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÛÛX›H‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+”ÛÛX›HX]\šX[ŠNÂˆY‹OÛÛ\H
+”ÛÛX›HX]\šX[\ÈÛÛ[[Û›H\ÙYÈš[Ý\ÜÈ[™Ý\Ü[\™˜XÙ\ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ú\×ÜÝ\Ü‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+”Ý\ÜX]\šX[ŠNÂˆY‹OÛÛ\H
+”Ý\ÜX]\šX[\ÈÛÛ[[Û›H\ÙYÈš[Ý\ÜÈ[™Ý\Ü[\™˜XÙ\ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ú\×ÚYÚÝ[\\˜]\™H‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+’\ÈYÚ][\\˜]\™Hš[[Y[ŠNÂˆY‹OÛÛ\H
+’[™XØ]\ÈÚ]\ˆ\È\ÈHYÚ][\\˜]\™Hš[[Y[]™\]Z\™\È[]˜]Yš[[™È[\\˜]\™\ËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÙ˜[Ù_JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+[\\˜]\™WÝš]šYšXØ][Ûˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+”ÛÙ[š[™È[\\˜]\™HŠNÂˆY‹OÛÛ\H
+•HX]\šX[ÛÙ[œÈ]\È[\\˜]\™KÛÈÚ[ˆH™Y[\\˜]\™H\È\]X[ÈÜˆÜ™X]\ˆ[ˆ\Ë‚ˆš]	ÜÈYÚH™XÛÛ[Y[™YÈÜ[ˆHœ›ÛÛÜˆ[™ÛÜˆ™[[Ý™HH\\ˆÛ\ÜÈÈ]›ÚYÛÙÙÚ[™ËˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈLJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ØÛÜÝ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”šXÙHŠNÂˆY‹OÛÛ\H
+‘š[[Y[šXÙKˆ›ÜˆÝ]\ÝXÜÈÛ›KˆŠNÂˆY‹OœÚY]^H
+›[Û™^KÚÙÈŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈˆJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÙ][™Ü×ÚY‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈˆˆJNÂˆËÐ”ÎˆÜ[ˆ\ÈÜ[ÛˆÈÛÛ[X[™[™BˆËÙY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÚYÈ‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ý™[™Üˆ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+•™[™ÜˆŠNÂˆY‹OÛÛ\H
+•™[™ÜˆÙˆš[[Y[ˆ›ÜˆÚÝÈÛ›KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÓ
+Š[™Yš[™Y
+HŠ_JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œÜÛÛX[—Ý\›‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”ÜÛÛX[ˆT“ŠNÂˆY‹OÛÛ\H
+Y™\ÜÈÙˆHÜÛÛX[ˆÙ\™\ˆ\ÙYÈ[šÈ\Èš[[Y[›Ùš[KˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈš‹ËÌNL‹ŒMŽŒMÎŽNÎLLˆŸJNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œÜÛÛX[—Ùš[[Y[ÚY‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”ÜÛÛX[ˆš[[Y[Q
+Ü[Û˜[
+HŠNÂˆY‹OÛÛ\H
+•Ú[ˆÙ]Ø]š[™È\È›Ùš[H\›X[™[H[šÜÈ]ÈHX]Ú[™ÈÜÛÛX[ˆš[[Y[ˆX]™H[\HÈ\ÙH]]ÛX]XÈ˜[YHX]Ú[™ËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÞÈˆŸJNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+š[™š[Ù\™XÝ[Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[\™XÝ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+[™ÛH›ÜˆÜ\œÙH[™š[]\›‹ÚXÚÛÛ›ÛÈHÝ\ÜˆXZ[ˆ\™XÝ[ÛˆÙˆ[™KˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÍŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œÛÛYÚ[™š[Ù\™XÝ[Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ÛÛY[™š[\™XÝ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+[™ÛH›ÜˆÛÛY[™š[]\›‹ÚXÚÛÛ›ÛÈHÝ\ÜˆXZ[ˆ\™XÝ[ÛˆÙˆ[™KˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÍŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[Ù[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+‘[œÚ]HÙˆ[\›˜[Ü\œÙH[™š[L	H\›œÈ[Ü\œÙH[™š[[ÈÛÛY[™š[[™[\›˜[ÛÛY[™š[]\›ˆÚ[™H\ÙYˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+Œ
+JNÂˆˆYˆH\ËO˜Y
+˜[YÛ—Ú[™š[Ù\™XÝ[Û—Ý×Û[Ù[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+[YÛˆ[™š[\™XÝ[ÛˆÈ[Ù[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+[YÛœÈ[™š[[™Ý\™˜XÙHš[\™XÝ[ÛœÈÈ›ÛÝÈH[Ù[	ÜÈÜšY[][ÛˆÛˆHZ[]KˆÚ[ˆ[˜X›Yš[\™XÝ[ÛœÈ›Ý]HÚ]H[Ù[ÈXZ[Z[ˆÜ[X[Ý™[™ÝÚ\˜XÝ\š\ÝXÜËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™^˜WÜÛÛYÚ[™š[È‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+’[œÙ\ÛÛY^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+’[œÙ\ÛÛY[™š[]ÜXÚYšXÈ^Y\œËˆ\ÙHˆÈ[œÙ\]™\žH^Y\‹ˆÒÈÈ[œÙ\ÈÛÛœÙXÝ]]™HÛÛY^Y\œÈ]™\žHˆ^Y\œÈ
+È\ÈÜ[Û˜[K™Ëˆ	ÍHÉÈ\]X[È	ÍHÌIÊKÜˆHÛÛ[XK\Ù\\˜]Y\Ý
+K™ËˆKËJHÈ[œÙ\]^XÚ]^Y\œËˆ^Y\œÈ\™HKX˜\ÙYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚‚ˆËÈ[™š[][[[™BˆYˆH\ËO˜Y
+™š[Û][[[™H‹ÛÒ[
+NÂˆY‹O›X™[H
+‘š[][[[™HŠNÂˆY‹OÛÛ\H
+•\Ú[™È][\H[™\È›ÜˆH[™š[]\›‹YˆÝ\ÜYžH[™š[]\›‹ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O›X^HNÈËÈX^[][H[X™\ˆÙˆ[™\È›Üˆ[™š[]\›‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[Ü]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+”Ü\œÙH[™š[]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆ›Üˆ[\›˜[Ü\œÙH[™š[ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[™š[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜[YÛ™Y™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊžšYÞ˜YÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Ü›ÜÜÞ˜YÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›ØÚÙY˜YÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›[™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™ÜšYŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšX[™Û\ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšKZ^YÛÛˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÝXšXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Y\]™XÝXšXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ]X\\˜ÝXšXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÝ\ÜÝXšXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›YÚš[™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšÛ™^XÛÛXˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒÙÛ™^XÛÛXˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›]\˜[ZÛ™^XÛÛXˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›]\˜[[]XÙHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Ü›ÜÜÚ]ÚŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ\ÙŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ\ÙšÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™Þ\›ÚYŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÛ˜Ù[šXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš[™\Ý\™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜\˜Ú[YYX[˜ÚÜ™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›ØÝYÜ˜[\Ü\˜[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+[YÛ™Y™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+–šYÈ˜YÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Ü›ÜÜÈ˜YÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“ØÚÙY˜YÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“[™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘ÜšYŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•šX[™Û\ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•šKZ^YÛÛˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÝXšXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Y\]™HÝXšXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”]X\\ˆÝXšXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”Ý\ÜÝXšXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“YÚš[™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’Û™^XÛÛXˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ŒÑÛ™^XÛÛXˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“]\˜[Û™^XÛÛXˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“]\˜[]XÙHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Ü›ÜÜÈ]ÚŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•TËQŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•TËQ’ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘Þ\›ÚYŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛ˜Ù[šXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’[™\Ý\™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+\˜Ú[YYX[ˆÚÜ™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“ØÝYÜ˜[HÜ\˜[ŠJNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[™š[]\›Š\Ü›ÜÜÒ]Ú
+JNÂ‚ˆYˆH\ËO˜Y
+›]\˜[Û]XÙWØ[™ÛWÌH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“]\˜[]XÙH[™ÛHHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H[™ÛHÙˆHš\œÝÙ]Ùˆ]\˜[]XÙH[[Y[È[ˆHˆ\™XÝ[Û‹ˆ™\›È\È™\XØ[ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHMÍNÂˆY‹O›X^HÍNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+MJJNÂ‚ˆYˆH\ËO˜Y
+›]\˜[Û]XÙWØ[™ÛWÌˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“]\˜[]XÙH[™ÛHˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H[™ÛHÙˆHÙXÛÛ™Ù]Ùˆ]\˜[]XÙH[[Y[È[ˆHˆ\™XÝ[Û‹ˆ™\›È\È™\XØ[ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHMÍNÂˆY‹O›X^HÍNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[™š[ÛÝ™\š[™×Ø[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[™š[Ý™\š[™È[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H[™ÛHÙˆH[™š[[™ÛY[™\ËˆŒ0¬Ú[™\Ý[[ˆH\™HÛ™^XÛÛX‹ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHMNÂˆY‹O›X^HÍNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆ]]ÈY—Ú[™š[Ø[˜ÚÜ—ÛZ[ˆHYˆH\ËO˜Y
+š[™š[Ø[˜ÚÜˆ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[[˜ÚÜˆ[™ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+ÛÛ›™XÝ[ˆ[™š[[™HÈ[ˆ[\›˜[\š[Y]\ˆÚ]HÚÜÙYÛY[Ùˆ[ˆY][Û˜[\š[Y]\‹ˆ‚ˆ’Yˆ^™\ÜÙY\È\˜Ù[YÙH
+^[\NˆMIJH]\ÈØ[Ý[]YÝ™\ˆ[™š[^\Ú[ÛˆÚYˆ‚ˆ”Û˜\XZÙ\ˆÜ˜ØHšY\ÈÈÛÛ›™XÝÛÈÛÜÙH[™š[[™\ÈÈHÚÜ\š[Y]\ˆÙYÛY[ˆYˆ›ÈÝXÚ\š[Y]\ˆÙYÛY[‚ˆœÚÜ\ˆ[ˆ[™š[Ø[˜ÚÜ—ÛX^\È›Ý[™H[™š[[™H\ÈÛÛ›™XÝYÈH\š[Y]\ˆÙYÛY[]\ÝÛ™HÚYH‚ˆ˜[™H[™ÝÙˆH\š[Y]\ˆÙYÛY[ZÙ[ˆ\È[Z]YÈ\È\˜[Y]\‹]›ÈÛ™Ù\ˆ[ˆ[˜ÚÜ—Û[™ÝÛX^—ˆ‚ˆ”Ù]\È\˜[Y]\ˆÈ™\›ÈÈ\ØX›H[˜ÚÜš[™È\š[Y]\œÈÛÛ›™XÝYÈHÚ[™ÛH[™š[[™KˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆHœÜ\œÙWÚ[™š[Û[™WÝÚYŽÂˆY‹O›X^Û]\˜[HLÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ™—Ù[[WÛÜ[ŽÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒLŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒLŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Œ
+›ÈÜ[ˆ[˜ÚÜœÊHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒH[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒˆ[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊH[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒL[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ŒL
+[›[Z]Y
+HŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+YJJNÂ‚ˆYˆH\ËO˜Y
+š[™š[Ø[˜ÚÜ—ÛX^‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+“X^[][H[™ÝÙˆH[™š[[˜ÚÜˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+ÛÛ›™XÝ[ˆ[™š[[™HÈ[ˆ[\›˜[\š[Y]\ˆÚ]HÚÜÙYÛY[Ùˆ[ˆY][Û˜[\š[Y]\‹ˆ‚ˆ’Yˆ^™\ÜÙY\È\˜Ù[YÙH
+^[\NˆMIJH]\ÈØ[Ý[]YÝ™\ˆ[™š[^\Ú[ÛˆÚYˆ‚ˆ”Û˜\XZÙ\ˆÜ˜ØHšY\ÈÈÛÛ›™XÝÛÈÛÜÙH[™š[[™\ÈÈHÚÜ\š[Y]\ˆÙYÛY[ˆYˆ›ÈÝXÚ\š[Y]\ˆÙYÛY[‚ˆœÚÜ\ˆ[ˆ\È\˜[Y]\ˆ\È›Ý[™H[™š[[™H\ÈÛÛ›™XÝYÈH\š[Y]\ˆÙYÛY[]\ÝÛ™HÚYH‚ˆ˜[™H[™ÝÙˆH\š[Y]\ˆÙYÛY[ZÙ[ˆ\È[Z]YÈ[™š[Ø[˜ÚÜ‹]›ÈÛ™Ù\ˆ[ˆ\È\˜[Y]\‹—ˆ‚ˆ’YˆÙ]ÈHÛ[ÛÜš]H›Üˆ[™š[ÛÛ›™XÝ[ÛˆÚ[™H\ÙY]ÚÝ[Ü™X]HHØ[YH™\Ý[\ÈÚ]L	ˆˆŠNÂˆY‹OœÚY]^HY—Ú[™š[Ø[˜ÚÜ—ÛZ[‹OœÚY]^ÂˆY‹Oœ˜][×ÛÝ™\ˆHY—Ú[™š[Ø[˜ÚÜ—ÛZ[‹Oœ˜][×ÛÝ™\ŽÂˆY‹O™ÝZWÝ\HHY—Ú[™š[Ø[˜ÚÜ—ÛZ[‹O™ÝZWÝ\NÂˆY‹O™[[WÝ˜[Y\ÈHY—Ú[™š[Ø[˜ÚÜ—ÛZ[‹O™[[WÝ˜[Y\ÎÂˆY‹O›X^Û]\˜[HY—Ú[™š[Ø[˜ÚÜ—ÛZ[‹O›X^Û]\˜[ÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Œ
+Ú[\HÛÛ›™XÝ
+HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒH[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒˆ[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊH[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒL[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ŒL
+[›[Z]Y
+HŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+Œ˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Ý]\—ÝØ[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Ý]\ˆØ[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆÝ]\ˆØ[ËˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+š[›™\—ÝØ[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[›™\ˆØ[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆ[›™\ˆØ[ËˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+˜]™[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•˜]™[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆ˜]™[[Ý™\ËˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙHŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆÜÝ\™˜XÙH[™š[ˆ\Ú[™ÈHÝÙ\ˆ˜[YHX^H[\›Ý™HÜÝ\™˜XÙH]X[]KˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+›Ý]\—ÝØ[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Ý]\ˆØ[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆÝ]\ˆØ[ˆ\Ú[™ÈHÝÙ\ˆ˜[YHØ[ˆ[\›Ý™H]X[]KˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+˜œšYÙWØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+œšYÙHŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆœšYÙ\ËˆYˆH˜[YH\È^™\ÜÙY\ÈH\˜Ù[YÙH
+K™ËˆL	JK]Ú[™HØ[Ý[]Y˜\ÙYÛˆHÝ]\ˆØ[XØÙ[\˜][Û‹ˆŠNÂˆY‹OœÚY]^H
+›[KÜð¬ˆÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹Oœ˜][×ÛÝ™\ˆH›Ý]\—ÝØ[ØXØÙ[\˜][ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆÜ\œÙH[™š[ˆYˆH˜[YH\È^™\ÜÙY\ÈH\˜Ù[YÙH
+K™ËˆL	JK]Ú[™HØ[Ý[]Y˜\ÙYÛˆHY˜][XØÙ[\˜][Û‹ˆŠNÂˆY‹OœÚY]^H
+›[KÜð¬ˆÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹Oœ˜][×ÛÝ™\ˆH™Y˜][ØXØÙ[\˜][ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ÜÛÛYÚ[™š[ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[\›˜[ÛÛY[™š[ŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆ[\›˜[ÛÛY[™š[ˆYˆH˜[YH\È^™\ÜÙY\ÈH\˜Ù[YÙH
+K™ËˆL	JK]Ú[™HØ[Ý[]Y˜\ÙYÛˆHY˜][XØÙ[\˜][Û‹ˆŠNÂˆY‹OœÚY]^H
+›[KÜð¬ˆÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹Oœ˜][×ÛÝ™\ˆH™Y˜][ØXØÙ[\˜][ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—ØXØÙ[\˜][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹OÛÛ\H
+XØÙ[\˜][ÛˆÙˆ[š]X[^Y\‹ˆ\Ú[™ÈHÝÙ\ˆ˜[YHØ[ˆ[\›Ý™HZ[]HY\Ú[Û‹ˆŠNÂˆY‹OœÚY]^HN›[KÜð¬ˆŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Ì
+JNÂ‚ˆYˆH\ËO˜Y
+˜XØÙ[Ý×ÙXÙ[Ù[˜X›H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[˜X›HXØÙ[Ý×ÙXÙ[ŠNÂˆY‹OÛÛ\H
+’Û\\‰ÜÈX^ØXØÙ[Ý×ÙXÙ[Ú[™HY\ÝY]]ÛX]XØ[KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂˆˆYˆH\ËO˜Y
+˜XØÙ[Ý×ÙXÙ[Ù˜XÝÜˆ‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+˜XØÙ[Ý×ÙXÙ[ŠNÂˆY‹OÛÛ\H
+’Û\\‰ÜÈX^ØXØÙ[Ý×ÙXÙ[Ú[™HY\ÝYÈ\È	IHÙˆXØÙ[\˜][Û‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂˆˆYˆH\ËO˜Y
+™Y˜][Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘Y˜][ŠNÂˆY‹OÛÛ\H
+‘Y˜][™\šËˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+™Y˜][Ú[˜Ý[Û—Ù]šX][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[˜Ý[Ûˆ]šX][ÛˆŠNÂˆY‹OÛÛ\H
+“X\›[ˆš\›]Ø\™H[˜Ý[Ûˆ]šX][Ûˆ
+™\XÙ\ÈH˜Y][Û˜[H™\šÈÙ][™ÊKˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+›Ý]\—ÝØ[Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Ý]\ˆØ[ŠNÂˆY‹OÛÛ\H
+’™\šÈÙˆÝ]\ˆØ[ËˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[›™\—ÝØ[Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[›™\ˆØ[ŠNÂˆY‹OÛÛ\H
+’™\šÈÙˆ[›™\ˆØ[ËˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWÚ™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙHŠNÂˆY‹OÛÛ\H
+’™\šÈ›ÜˆÜÝ\™˜XÙKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[™š[Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[™š[ŠNÂˆY‹OÛÛ\H
+’™\šÈ›Üˆ[™š[ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹OÛÛ\H
+’™\šÈ›Üˆ[š]X[^Y\‹ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+˜]™[Ú™\šÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•˜]™[ŠNÂˆY‹OÛÛ\H
+’™\šÈ›Üˆ˜]™[ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŠJNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚYÙˆ[š]X[^Y\‹ˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—Üš[ÚZYÚ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆZYÚŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+’ZYÚÙˆ[š]X[^Y\‹ˆXZÚ[™È[š]X[^Y\ˆZYÚÈ™HXÚÈÛYÚHØ[ˆ[\›Ý™HZ[]HY\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆËÙYˆH\ËO˜Y
+˜Y\]™WÛ^Y\—ÚZYÚ‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+Y\]™H^Y\ˆZYÚŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆËÙY‹OÛÛ\H
+‘[˜X›[™È\ÈÜ[ÛˆYX[œÈHZYÚÙˆ]™\žH^Y\ˆ^Ù\Hš\œÝÚ[™H]]ÛX]XØ[HØ[Ý[]Y‚ˆËÈ™\š[™ÈÛXÚ[™ÈXØÛÜ™[™ÈÈHÛÜHÙˆH[Ù[8 &\ÈÝ\™˜XÙK—ˆ‚ˆËÈ“›ÝH]\ÈÜ[ÛˆÛ›HZÙ\ÈY™™XÝYˆ›Èš[YHÝÙ\ˆ\ÈÙ[™\˜]Y[ˆÝ\œ™[]KˆŠNÂˆËÙY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆ[š]X[^Y\ˆ^Ù\HÛÛY[™š[\ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Ì
+JNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—Ú[™š[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆ[™š[ŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆÛÛY[™š[\Ùˆ[š]X[^Y\‹ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŒ
+JNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—Ý˜]™[ÜÜYY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆ˜]™[ÜYYŠNÂˆY‹OÛÛ\H
+•˜]™[ÜYYÙˆ[š]X[^Y\‹ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OœÚY]^H
+›[KÜÈÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH˜]™[ÜÜYYŽÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+œÛÝ×ÙÝÛ—Û^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+“[X™\ˆÙˆÛÝÈ^Y\œÈŠNÂˆY‹OÛÛ\H
+•Hš\œÝ™]È^Y\œÈ\™Hš[YÛÝÙ\ˆ[ˆ›Ü›X[ˆ‚ˆ•HÜYY\ÈÜ˜YX[H[˜Ü™X\ÙY[ˆH[™X\ˆ˜\Ú[ÛˆÝ™\ˆHÜXÚYšYY[X™\ˆÙˆ^Y\œËˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÈËÈÔÐHYÚYH^ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÝ[\\˜]\™WÚ[š]X[Û^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹O™[ÛX™[H
+’[š]X[^Y\ˆ›Þž›H[\\˜]\™HŠNÂˆY‹OÛÛ\H
+“›Þž›H[\\˜]\™H›Üˆš[[™È[š]X[^Y\ˆÚ[ˆ\Ú[™È\Èš[[Y[ˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈŒJNÂ‚ˆYˆH\ËO˜Y
+™[Ù˜[—ÜÜYYÛ^Y\ˆ‹ÛÒ[ÊNÂˆY‹O›X™[H
+‘[˜[ˆÜYY]^Y\ˆŠNÂˆY‹OÛÛ\H
+‘˜[ˆÜYYÚ[™H˜[\Y\[™X\›Hœ›ÛH™\›È]^Y\ˆ˜ÛÜÙWÙ˜[—ÝWÙš\œÝÞÛ^Y\œ×ˆ‚ˆÈX^[][H]^Y\ˆ™[Ù˜[—ÜÜYYÛ^Y\—‹ˆ‚ˆ—™[Ù˜[—ÜÜYYÛ^Y\—ˆÚ[™HYÛ›Ü™YYˆÝÙ\ˆ[ˆ˜ÛÜÙWÙ˜[—ÝWÙš\œÝÞÛ^Y\œ×‹[ˆÚXÚØ\ÙH‚ˆH˜[ˆÚ[™H[›š[™È]X^[][H[ÝÙYÜYY]^Y\ˆ˜ÛÜÙWÙ˜[—ÝWÙš\œÝÞÛ^Y\œ×ˆ
+ÈKˆŠNÂˆY‹OœÚY]^H
+›^Y\ˆŠNÈËÈÔÐHYÚYH^ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈJNÂˆˆYˆH\ËO˜Y
+œÝ\ÜÛX]\šX[Ú[\™˜XÙWÙ˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+”Ý\Ü[\™˜XÙH˜[ˆÜYYŠNÂˆY‹OÛÛ\H
+•\È\ÛÛÛ[™È˜[ˆÜYY\È\YYÚ[ˆš[[™ÈÝ\Ü[\™˜XÙ\ËˆÙ][™È\È\˜[Y]\ˆÈHYÚ\ˆ[ˆ™YÝ[\ˆÜYY‚ˆœ™YXÙ\ÈH^Y\ˆš[™[™ÈÝ™[™Ý™]ÙY[ˆÝ\ÜÈ[™HÝ\ÜY\XZÚ[™È[HX\ÚY\ˆÈÙ\\˜]Kˆ‚ˆ—”Ù]ÈLHÈ\ØX›H]ˆ‚ˆ—•\ÈÙ][™È\ÈÝ™\œšY[ˆžH\ØX›WÙ˜[—Ùš\œÝÛ^Y\œËˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHLNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈLHJNÂˆˆËÈÔÐNˆYÝ\Ü›ÜˆÙ\\˜]H[\›˜[œšYÙH˜[ˆÜYYÛÛ›ÛˆYˆH\ËO˜Y
+š[\›˜[ØœšYÙWÙ˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+’[\›˜[œšYÙ\È˜[ˆÜYYŠNÂˆY‹OÛÛ\H
+•H\ÛÛÛ[™È˜[ˆÜYY\ÙY›Üˆ[[\›˜[œšYÙ\ËˆÙ]ÈLHÈ\ÙHHÝ™\š[™È˜[ˆÜYYÙ][™ÜÈ[œÝXY——ˆ‚ˆ”™YXÚ[™ÈH[\›˜[œšYÙ\È˜[ˆÜYYÛÛ\\™YÈ[Ý\ˆ™YÝ[\ˆ˜[ˆÜYYØ[ˆ[™YXÙH\Ø\œ[™ÈYHÈ^Ù\ÜÚ]™H‚ˆ˜ÛÛÛ[™È\YYÝ™\ˆH\™ÙHÝ\™˜XÙH›ÜˆH›ÛÛ™ÙY\š[ÙÙˆ[YKˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHLNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈLHJNÂˆˆYˆH\ËO˜Y
+š\›Ûš[™×Ù˜[—ÜÜYY‹ÛÒ[ÊNÂˆY‹O›X™[H
+’\›Ûš[™È˜[ˆÜYYŠNÂˆY‹OÛÛ\H
+•\È\ÛÛÛ[™È˜[ˆÜYY\È\YYÚ[ˆ\›Ûš[™ËˆÙ][™È\È\˜[Y]\ˆÈHÝÙ\ˆ[ˆ™YÝ[\ˆÜYY‚ˆœ™YXÙ\ÈÜÜÚX›H›Þž›HÛÙÙÚ[™ÈYHÈHÝÈ›Û[Y]šXÈ›ÝÈ˜]KXZÚ[™ÈH[\™˜XÙHÛ[ÛÝ\‹ˆ‚ˆ—”Ù]ÈLHÈ\ØX›H]ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHLNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÈLHJNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+”˜[™Û[Hš]\ˆÚ[Hš[[™ÈHØ[ÛÈ]HÝ\™˜XÙH\ÈH›ÝYÚÛÚËˆ\ÈÙ][™ÈÛÛ›ÛÈ‚ˆH^žžHÜÚ][Û‹ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O^žžTÚÚ[•\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››Û™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™^\›˜[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜[Ø[ÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›Û™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛÝ\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛÝ\ˆ[™ÛHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+[Ø[ÈŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O^žžTÚÚ[•\OŠ^žžTÚÚ[•\NŽ“›Û™JJNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—ÝXÚÛ™\ÜÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆXÚÛ™\ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•HÚYÚ][ˆÚXÚÈš]\‹ˆ]	ÜÈYš\ÙYÈ™H™[ÝÈÝ]\ˆØ[[™HÚYˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—ÜÚ[Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆÚ[\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•H]™\˜YÙH\Ý[˜ÙH™]ÙY[ˆH˜[™ÛHÚ[È[›ÙXÙYÛˆXXÚ[™HÙYÛY[ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒÊJNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—Ùš\œÝÛ^Y\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+\H^žžHÚÚ[ˆÈš\œÝ^Y\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•Ú]\ˆÈ\H^žžHÚÚ[ˆÛˆHš\œÝ^Y\‹ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—Û[ÙH‹ÛÑ[[JNÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆÙ[™\˜]Üˆ[ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+‘^žžHÚÚ[ˆÙ[™\˜][Ûˆ[ÙKˆÛÜšÜÈÛ›HÚ]\˜XÚ™HWˆ‚ˆ‘\ÜXÙ[Y[ˆ4([\ÜÚXÈ[ÙHÚ[ˆH]\›ˆ\È›Ü›YYžHÚY[™ÈH›Þž›HÚY]Ø^\Èœ›ÛHHÜšYÚ[˜[]—ˆ‚ˆ‘^\Ú[ÛŽˆH[ÙHÚ[ˆH]\›ˆ›Ü›YYžHH[[Ý[Ùˆ^YY\ÝXËˆ‚ˆ•\È\ÈH˜\Ý[™Ý˜ZYÚ[ÛÜš]HÚ]Ý][›™XÙ\ÜØ\žH›Þž›HÚZÙH]Ú]™\ÈHÛ[ÛÝ]\›‹ˆ‚ˆ]]\È[Ü™H\ÙY[›Üˆ›Ü›Z[™ÈÛÜÙHØ[È[ˆH[\™H^H\œ˜^K—ˆ‚ˆÛÛXš[™Yˆ›Ú[[ÙHÑ\ÜXÙ[Y[H
+ÈÑ^\Ú[Û—KˆH\X\˜[˜ÙHÙˆHØ[È\ÈÚ[Z[\ˆÈÑ\ÜXÙ[Y[H[ÙK]]X]™\È›ÈÜ™\È™]ÙY[ˆH\š[Y]\œË——ˆ‚ˆ][[ÛˆHHÑ^\Ú[Û—H[™ÐÛÛXš[™YH[Ù\ÈÛÜšÜÈÛ›HH^žžWÜÚÚ[—ÝXÚÛ™\ÜÈ\˜[Y]\ˆ›Ý[Ü™H[ˆHXÚÛ™\ÜÈÙˆš[YÛÜˆ‚ˆ]HØ[YH[YKHÚYÙˆH^\Ú[Ûˆ›ÜˆH\XÝ[\ˆ^Y\ˆÚÝ[[ÛÈ›Ý™H™[ÝÈHÙ\Z[ˆ]™[ˆ‚ˆ’]\È\ÝX[H\]X[MKLIIHÙˆH^Y\ˆZYÚˆ\™Y›Ü™KHX^[][H^žžHÚÚ[ˆXÚÛ™\ÜÈÚ]H\š[Y]\ˆÚYÙˆ[H[™H^Y\ˆZYÚÙˆŒˆ[HÚ[™HJŒŠŒŒJOp¬LŒÍ[[HH‚ˆ’Yˆ[ÝH[\ˆHYÚ\ˆ\˜[Y]\ˆ[ˆ\ËH\œ›Üˆ›ÝÎŽœÜXÚ[™Ê
+HÚ[\Ü^YY[™H[Ù[Ú[›Ý™HÛXÙYˆ[ÝHØ[ˆÚÛÜÙH\È[X™\ˆ[[\È\œ›Üˆ\È™\X]Yˆˆ
+NÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O^žžTÚÚ[“[ÙOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™\ÜXÙ[Y[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™^\Ú[ÛˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÛXš[™YŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘\ÜXÙ[Y[ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘^\Ú[ÛˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛXš[™YŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O^žžTÚÚ[“[ÙOŠ^žžTÚÚ[“[ÙNŽ‘\ÜXÙ[Y[
+JNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—Û›Ú\ÙWÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆ›Ú\ÙH\HŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+“›Ú\ÙH\HÈ\ÙH›Üˆ^žžHÚÚ[ˆÙ[™\˜][ÛŽ—ˆ‚ˆÛ\ÜÚXÎˆÛ\ÜÚXÈ[šY›Ü›H˜[™ÛH›Ú\ÙK—ˆ‚ˆ”\›[Žˆ\›[ˆ›Ú\ÙKÚXÚÚ]™\ÈH[Ü™HÛÛœÚ\Ý[^\™K—ˆ‚ˆš[ÝÎˆÚ[Z[\ˆÈ\›[ˆ›Ú\ÙK]Û[\Y\‹—ˆ‚ˆ”šYÙY][Yœ˜XÝ[ˆšYÙY›Ú\ÙHÚ]Ú\œ˜YÙÙY™X]\™\ËˆÜ™X]\ÈX\˜›K[ZÙH^\™\Ë—ˆ‚ˆ•›Ü›Û›ÚNˆ]šY\ÈHÝ\™˜XÙH[È›Ü›Û›ÚHÙ[Ë[™\ÜXÙ\ÈXXÚÛ™HžHH˜[™ÛH[[Ý[ˆÜ™X]\ÈH]ÚÛÜšÈ^\™KˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O›Ú\ÙU\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Û\ÜÚXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ\›[ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜š[ÝÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœšYÙY][HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›Ü›Û›ÚHŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Û\ÜÚXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”\›[ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+š[ÝÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”šYÙY][Yœ˜XÝ[ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•›Ü›Û›ÚHŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O›Ú\ÙU\OŠ›Ú\ÙU\NŽÛ\ÜÚXÊJNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—ÜØØ[H‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆ™X]\™HÚ^™HŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•H˜\ÙHÚ^™HÙˆHÛÚ\™[›Ú\ÙH™X]\™\Ë[ˆ[KˆYÚ\ˆ˜[Y\ÈÚ[™\Ý[[ˆ\™Ù\ˆ™X]\™\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHŒNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—ÛØÝ]™\È‹ÛÒ[
+NÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆ›Ú\ÙHØÝ]™\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•H[X™\ˆÙˆØÝ]™\ÈÙˆÛÚ\™[›Ú\ÙHÈ\ÙKˆYÚ\ˆ˜[Y\È[˜Ü™X\ÙHH]Z[ÙˆH›Ú\ÙK][ÛÈ[˜Ü™X\ÙHÛÛ\]][Ûˆ[YKˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+™^žžWÜÚÚ[—Ü\œÚ\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^žžHÚÚ[ˆ›Ú\ÙH\œÚ\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\œÈŠNÂˆY‹OÛÛ\H
+•HXØ^H˜]H›ÜˆYÚ\ˆØÝ]™\ÈÙˆHÛÚ\™[›Ú\ÙKˆÝÙ\ˆ˜[Y\ÈÚ[™\Ý[[ˆÛ[ÛÝ\ˆ›Ú\ÙKˆŠNÂˆY‹O›Z[ˆHŒNÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+™š[\—ÛÝ]ÙØ\Ùš[‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘š[\ˆÝ][žHØ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+“^Y\œÈ[™\š[Y]\œÈŠNÂˆY‹OÛÛ\H
+‘Û‰Ýš[Ø\š[Ú]H[™Ý\ÈÛX[\ˆ[ˆH™\ÚÛÜXÚYšYY
+[ˆ[JKˆ\ÈÙ][™È\Y\ÈÈÜ‚ˆ˜›ÝÛH[™ÛÛY[™š[[™Yˆ\Ú[™ÈHÛ\ÜÚXÈ\š[Y]\ˆÙ[™\˜]Ü‹ÈØ[Ø\š[ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂˆˆYˆH\ËO˜Y
+™Ø\Ú[™š[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘Ø\[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆØ\[™š[ˆØ\\ÝX[H\È\œ™YÝ[\ˆ[™HÚY[™ÚÝ[™Hš[Y[Ü™HÛÝÛKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Ì
+JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+œ™XÚ\ÙWÞ—ÚZYÚ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™XÚ\ÙHˆZYÚŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈÙ]™XÚ\ÙHˆZYÚÙˆØš™XÝY\ˆÛXÚ[™Ëˆ‚ˆ’]Ú[Ù]H™XÚ\ÙHØš™XÝZYÚžHš[™K][š[™ÈH^Y\ˆZYÚÈÙˆH\Ý™]È^Y\œËˆ‚ˆ“›ÝH]\È\È[ˆ^\š[Y[[\˜[Y]\‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+™[˜X›WØ\˜×Ùš][™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+\˜Èš][™ÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈÙ]HËXÛÙHš[HÚXÚ\ÈÌˆ[™ÌÈ[Ý™\Ëˆ‚ˆ•Hš][™ÈÛ\˜[˜ÙH\ÈØ[YH\ÈH™\ÛÛ][Û‹——ˆ‚ˆ“›ÝNˆ›ÜˆÛ\\ˆXXÚ[™\Ë\ÈÜ[Ûˆ\È™XÛÛ[Y[™YÈ™H\ØX›YˆÛ\\ˆÙ\È›Ý™[™Yš]œ›ÛH‚ˆ˜\˜ÈÛÛ[X[™È\È\ÙH\™HÜ]YØZ[ˆ[È[™HÙYÛY[ÈžHHš\›]Ø\™Kˆ\È™\Ý[È[ˆH™YXÝ[Ûˆ‚ˆš[ˆÝ\™˜XÙH]X[]H\È[™HÙYÛY[È\™HÛÛ™\YÈ\˜ÜÈžHHÛXÙ\ˆ[™[ˆ˜XÚÈÈ[™HÙYÛY[È‚ˆ˜žHHš\›]Ø\™KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂˆËÈ”ÂˆYˆH\ËO˜Y
+™ØÛÙWØYÛ[™WÛ[X™\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+Y[™H[X™\ˆŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈY[™H[X™\Šž
+H]H™YÚ[›š[™ÈÙˆXXÚËXÛÙH[™KˆŠNÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+œØØ[—Ùš\œÝÛ^Y\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”ØØ[ˆš\œÝ^Y\ˆŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈ[˜X›HHØ[Y\˜HÛˆš[\ˆÈÚXÚÈH]X[]HÙˆš\œÝ^Y\‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚‚ˆËÐ”ÂˆËÈYˆH\ËO˜Y
+œÜYÚ]WÙ]XÝÜˆ‹ÛÐ›ÛÛ
+NÂˆËÈY‹O›X™[H
+‘[˜X›HÜYÚ]H]XÝÜˆŠNÂˆËÈY‹OÛÛ\H
+‘[˜X›HHØ[Y\˜HÛˆš[\ˆÈÚXÚÈÜYÚ]KˆŠNÂˆËÈY‹O›[ÙHHÛÛTÚ[\NÂˆËÈY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+“›Þž›H\HŠNÂˆY‹OÛÛ\H
+•HY][XÈX]\šX[Ùˆ›Þž›Kˆ\È]\›Z[™\ÈHXœ˜\Ú]™H™\Ú\Ý[˜ÙHÙˆ›Þž›K[™‚ˆÚ]Ú[™Ùˆš[[Y[Ø[ˆ™Hš[YˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O›Þž›U\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ[™Yš[™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš\™[™YÜÝY[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÝZ[›\Ü×ÜÝY[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜œ˜\ÜÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•[™Yš[™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’\™[™YÝY[ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”ÝZ[›\ÜÈÝY[ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+œ˜\ÜÈŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O›Þž›U\OŠ[™Yš[™JJNÂ‚‚ˆYˆH\ËO˜Y
+››Þž›WÚ˜È‹ÛÒ[
+NÂˆY‹O›X™[H
+“›Þž›HÈŠNÂˆY‹OÛÛ\H
+•H›Þž›IÜÈ\™™\ÜËˆ™\›ÈYX[œÈ›ÈÚXÚÚ[™È›Üˆ›Þž›IÜÈ\™™\ÜÈ\š[™ÈÛXÚ[™ËˆŠNÂˆY‹OœÚY]^H
+’ÈŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÌJNÂ‚ˆYˆH\ËO˜Y
+œš[\—ÜÝXÝ\™H‹ÛÑ[[JNÂˆY‹O›X™[H
+”š[\ˆÝXÝ\™HŠNÂˆY‹OÛÛ\H
+•H\ÚXØ[\œ˜[™Ù[Y[[™ÛÛ\Û™[ÈÙˆHš[[™È]šXÙKˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[Oš[\”ÝXÝ\™OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ[™Yš[™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÜ™^HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšLÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊš›ÝŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•[™Yš[™HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÜ™VHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’LÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’›ÝŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘[HŠJNÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[Oš[\”ÝXÝ\™OŠÕ[™Yš[™JJNÂ‚ˆYˆH\ËO˜Y
+˜™\ÝÛØš™XÝÜÜÈ‹ÛÔÚ[
+NÂˆY‹O›X™[H
+™\ÝØš™XÝÜÚ][ÛˆŠNÂˆY‹OÛÛ\H
+™\Ý]]È\œ˜[™Ú[™ÈÜÚ][Ûˆ[ˆ˜[™ÙHÌWHËœ‹ˆ™YÚ\KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+KJJJNÂ‚ˆYˆH\ËO˜Y
+˜]^[X\žWÙ˜[ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+]^[X\žH\ÛÛÛ[™È˜[ˆŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆYˆXXÚ[™H\È]^[X\žH\ÛÛÛ[™È˜[‹ˆËXÛÙHÛÛ[X[™ˆLLˆˆÊLMJKˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™˜[—ÜÜYY\Ý[YH‹ÛÑ›Ø]
+NÂ‚KËÈX™[\ÈÙ][ˆX‹˜Ü[ˆH[™HØš™XÝ‚ˆËÙY‹O›X™[H
+‘˜[ˆÜYY]\[YHŠNÂˆY‹OÛÛ\H
+”Ý\H˜[ˆ\È[X™\ˆÙˆÙXÛÛ™ÈX\›Y\ˆ[ˆ]È\™Ù]Ý\[YH
+[ÝHØ[ˆ\ÙHœ˜XÝ[Û˜[ÙXÛÛ™ÊKˆ‚ˆˆ]\ÜÝ[Y\È[™š[š]HXØÙ[\˜][Ûˆ›Üˆ\È[YH\Ý[X][Û‹[™Ú[Û›HZÙH[ÈXØÛÝ[ÌH[™Ì[Ý™\È
+\˜Èš][™È‚ˆˆ\È[œÝ\ÜY
+Kˆ‚ˆ—’]ÛÛ‰Ý[Ý™H˜[ˆÛÛ[X[™Èœ›ÛHÝ\ÝÛHËXÛÙH
+^HXÝ\ÈHÛÜÙˆ	Ø˜\œšY\‰ÊKˆ‚ˆ—’]ÛÛ‰Ý[Ý™H˜[ˆÛÛ[X[™È[ÈHÝ\ËXÛÙHYˆH	ÛÛ›HÝ\ÝÛHÝ\ËXÛÙIÈ\ÈXÝ]˜]Yˆ‚ˆ—•\ÙHÈXXÝ]˜]KˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+™˜[—ÜÜYY\ÛÝ™\š[™ÜÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“Û›HÝ™\š[™ÜÈŠNÂˆY‹OÛÛ\H
+•Ú[Û›HZÙH[ÈXØÛÝ[H[^H›ÜˆHÛÛÛ[™ÈÙˆÝ™\š[™ÜËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+™˜[—ÚÚXÚÜÝ\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘˜[ˆÚXÚË\Ý\[YHŠNÂˆY‹OÛÛ\H
+‘[Z]HX^˜[ˆÜYYÛÛ[X[™›Üˆ\È[[Ý[ÙˆÙXÛÛ™È™Y›Ü™H™YXÚ[™ÈÈ\™Ù]ÜYYÈÚXÚË\Ý\HÛÛÛ[™È˜[‹ˆ‚ˆ—•\È\È\ÙY[›Üˆ˜[œÈÚ\™HHÝÈÓKÜÝÙ\ˆX^H™H[œÝY™šXÚY[ÈÙ]H˜[ˆÝ\YÜ[›š[™Èœ›ÛHHÝÜÜˆÈ‚ˆ™Ù]H˜[ˆ\ÈÜYY˜\Ý\‹ˆ‚ˆ—”Ù]ÈÈXXÝ]˜]KˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚‚ˆYˆH\ËO˜Y
+[YWØÛÜÝ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•[YHÛÜÝŠNÂˆY‹OÛÛ\H
+•Hš[\ˆÛÜÝ\ˆÝ\‹ˆŠNÂˆY‹OœÚY]^H
+›[Û™^KÚŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆËÈÜ˜ØNˆX^H™[[Ý™H\ÈÜ[Ûˆ]\‚ˆYˆ]\ËO˜Y
+œÝ\ÜØÚ[X™\—Ý[\ØÛÛ›Û‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[S
+”Ý\ÜÛÛ›ÛÚ[X™\ˆ[\\˜]\™HŠNÂˆY‹OÛÛ\S
+•\ÈÜ[Ûˆ\È[˜X›YYˆXXÚ[™HÝ\ÜÛÛ›Û[™ÈÚ[X™\ˆ[\\˜]\™W‘ËXÛÙHÛÛ[X[™ˆLMHÊLMJHŠNÂˆY‹O›[ÙOXÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂˆY‹Oœ™XYÛ›OY˜[ÙNÂ‚ˆYˆ]\ËO˜Y
+œÝ\ÜØZ\—Ùš[˜][Ûˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[S
+”Ý\ÜZ\ˆš[˜][ÛˆŠNÂˆY‹OÛÛ\S
+‘[˜X›H\ÈYˆš[\ˆÝ\ÜZ\ˆš[˜][Û—‘ËXÛÙHÛÛ[X[™ˆLLˆÈÊLMJHŠNÂˆY‹O›[ÙOXÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+™ØÛÙWÙ›]›Üˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+‘ËXÛÙH›]›ÜˆŠNÂˆY‹OÛÛ\H
+•Ú]Ú[™ÙˆËXÛÙHHš[\ˆ\ÈÛÛ\]X›HÚ]ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÐÛÙQ›]›ÜŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›X\›[ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšÛ\\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™\˜\š\›]Ø\™HŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™\]Y\ˆŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊXXÝ\ŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›XZÙ\Ø\™HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›X\›[ŒˆŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœØZ[š\ÚŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›XXÚÈŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›XXÚ[™ZÚ]ŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÛ[ÛÝYHŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››ËY^\Ú[ÛˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ“X\›[ŠYØXÞJHŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’Û\\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”™\˜\š\›]Ø\™HŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”™\˜\ÔÜš[\ˆŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”™\]Y\ˆŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ•XXÝ\ŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ“XZÙ\•Ø\™H
+XZÙ\›Ý
+HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ“X\›[ˆˆŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”ØZ[š\Ú
+XZÙ\›Ý
+HŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ“XXÚËÓ[^ÓÈŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ“XXÚ[™ZÚ]ŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”Û[ÛÝYHŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›È^\Ú[ÛˆŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹Oœ™XYÛ›HH˜[ÙNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÐÛÙQ›]›ÜŠØÙ“X\›[“YØXÞJJNÂ‚ˆYˆH\ËO˜Y
+œ[]Û[ÙYÜš[\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”[][ÙYš[\ˆŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆYˆ[Ý\ˆš[\ˆ\Ù\È[]È[œÝXYÙˆš[[Y[ËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛ][WØ™YÝ\\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ý\Ü][H™Y\\ÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆYˆ[ÝHØ[È\ÙH][\H™Y\\ËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™ØÛÙWÛX™[ÛØš™XÝÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“X™[Øš™XÝÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈYÛÛ[Y[È[ÈHËXÛÙHX™[[™Èš[[Ý™\ÈÚ]Ú]Øš™XÝ^H™[Û™ÈË‚ˆˆÚXÚ\È\ÙY[›ÜˆHØÝÜš[Ø[˜Ù[Øš™XÝYÚ[‹ˆ\ÈÙ][™ÜÈ\È“ÕÛÛ\]X›HÚ]‚ˆ”Ú[™ÛH^Y\ˆ][HX]\šX[Ù]\[™Ú\H[ÈØš™XÝÈÚ\H[È[™š[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+JJNÂ‚ˆYˆH\ËO˜Y
+™^ÛYWÛØš™XÝ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÛYHØš™XÝÈŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈYVÓQHÐ’‘PÕÛÛ[X[™[ˆËXÛÙKˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™ØÛÙWØÛÛ[Y[È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•™\˜›ÜÙHËXÛÙHŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÈÙ]HÛÛ[Y[YËXÛÙHš[KÚ]XXÚ[™H^Z[™YžHH\ØÜš\]™H^ˆ‚ˆ’Yˆ[ÝHš[œ›ÛHÑØ\™HY][Û˜[ÙZYÚÙˆHš[HÛÝ[XZÙH[Ý\ˆš\›]Ø\™H‚ˆœÛÝÈÝÛ‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+
+JNÂˆˆËÐ”ÂˆYˆH\ËO˜Y
+š[™š[ØÛÛXš[˜][Ûˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[™š[ÛÛXš[˜][ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+]]ÛX]XØ[HÛÛXš[™HÜ\œÙH[™š[ÙˆÙ]™\˜[^Y\œÈÈš[ÙÙ]\ˆÈ™YXÙH[YKˆØ[\ÈÝ[š[Y‚ˆÚ]ÜšYÚ[˜[^Y\ˆZYÚˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+š[™š[ÜÚYÜÝ\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[™š[ÚYÝ\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•\È\˜[Y]\ˆYÈHÛYÚ\ÜXÙ[Y[ÈXXÚ^Y\ˆÙˆ[™š[ÈÜ™X]HHÜ›ÜÜÈ^\™KˆŠNÂˆY‹OœÚY]^H
+›[HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆËÓÜ˜ØBˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[Ü›Ý]WÝ[\]H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”Ü\œÙH[™š[›Ý][Ûˆ[\]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+”›Ý]HHÜ\œÙH[™š[\™XÝ[Ûˆ\ˆ^Y\ˆ\Ú[™ÈH[\]HÙˆ[™Û\Ëˆ‚ˆ‘[\ˆÛÛ[XK\Ù\\˜]YYÜ™Y\È
+K™Ë‹	ÌÌŒL	ÊKˆ‚ˆ[™Û\È\™H\YY[ˆÜ™\ˆžH^Y\ˆ[™™\X]Ú[ˆH\Ý[™Ëˆ‚ˆY˜[˜ÙYÞ[^\ÈÝ\ÜYˆ	ÊÍIÈ›Ý]\È
+Íp¬]™\žH^Y\ŽÈ	ÊÍHÍIÈ›Ý]\È
+Íp¬]™\žHH^Y\œËˆÙYHHÚZÚH›Üˆ]Z[Ëˆ‚ˆ•Ú[ˆH[\]H\ÈÙ]HÝ[™\™[™š[\™XÝ[ÛˆÙ][™È\ÈYÛ›Ü™Yˆ‚ˆ“›ÝNˆÛÛYH[™š[]\›œÈ
+K™Ë‹Þ\›ÚY
+HÛÛ›Û›Ý][Ûˆ[\Ù[™\ÎÈ\ÙHÚ]Ø\™KˆŠNÂˆY‹OœÚY]^H
+°¬ŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÊˆŠJNÂ‚ˆËÓÜ˜ØBˆYˆH\ËO˜Y
+œÛÛYÚ[™š[Ü›Ý]WÝ[\]H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”ÛÛY[™š[›Ý][Ûˆ[\]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•\È\˜[Y]\ˆYÈH›Ý][ÛˆÙˆÛÛY[™š[\™XÝ[ÛˆÈXXÚ^Y\ˆXØÛÜ™[™ÈÈHÜXÚYšYY[\]Kˆ‚ˆ•H[\]H\ÈHÛÛ[XK\Ù\\˜]Y\ÝÙˆ[™Û\È[ˆYÜ™Y\ËK™Ëˆ	ÌL	Ëˆ‚ˆ•Hš\œÝ[™ÛH\È\YYÈHš\œÝ^Y\‹HÙXÛÛ™[™ÛHÈHÙXÛÛ™^Y\‹[™ÛÈÛ‹ˆ‚ˆ’Yˆ\™H\™H[Ü™H^Y\œÈ[ˆ[™Û\ËH[™Û\ÈÚ[™H™\X]Yˆ›ÝH]›Ý[ÛÛY[™š[]\›œÈÝ\Ü›Ý][Û‹ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÊˆŠJNÂ‚ˆYˆH\ËO˜Y
+œÚÙ[]Û—Ú[™š[Ù[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+”ÚÙ[]Ûˆ[™š[[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H™[XZ[š[™È\ÙˆH[Ù[ÛÛÝ\ˆY\ˆ™[[Ýš[™ÈHÙ\Z[ˆ\œ›ÛHHÝ\™˜XÙH\ÈØ[YHÚÙ[]Û‹ˆ‚ˆ•\È\˜[Y]\ˆ\È\ÙYÈY\ÝH[œÚ]HÙˆ\ÈÙXÝ[Û‹ˆ‚ˆ•Ú[ˆÛÈ™YÚ[ÛœÈ]™HHØ[YHÜ\œÙH[™š[Ù][™ÜÈ]Y™™\™[ÚÙ[]Ûˆ[œÚ]Y\ËZ\ˆÚÙ[]Ûˆ\™X\ÈÚ[]™[ÜÝ™\›\[™ÈÙXÝ[ÛœËˆ‚ˆ‘Y˜][\È\ÈØ[YH\È[™š[[œÚ]KˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+œÚÚ[—Ú[™š[Ù[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+”ÚÚ[ˆ[™š[[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•HÜ[ÛˆÙˆH[Ù[	ÜÈÝ]\ˆÝ\™˜XÙHÚ][ˆHÙ\Z[ˆ\˜[™ÙH\ÈØ[YHÚÚ[‹ˆ‚ˆ•\È\˜[Y]\ˆ\È\ÙYÈY\ÝH[œÚ]HÙˆ\ÈÙXÝ[Û‹ˆ‚ˆ•Ú[ˆÛÈ™YÚ[ÛœÈ]™HHØ[YHÜ\œÙH[™š[Ù][™ÜÈ]Y™™\™[ÚÚ[ˆ[œÚ]Y\Ë\È\™XHÚ[›Ý™HÜ][ÈÛÈÙ\\˜]H™YÚ[ÛœËˆ‚ˆ‘Y˜][\È\ÈØ[YH\È[™š[[œÚ]KˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+œÚÚ[—Ú[™š[Ù\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ÚÚ[ˆ[™š[\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H\˜[Y]\ˆÙ]ÈH\ÙˆÚÚ[‹ˆŠNÂˆY‹OœÚY]^H
+›[HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹Œ
+JNÂ‚ˆYˆH\ËO˜Y
+š[™š[ÛØÚ×Ù\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[™š[ØÚÈ\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H\˜[Y]\ˆÙ]ÈHÝ™\›\[™È\™]ÙY[ˆH[\š[Üˆ[™ÚÚ[‹ˆŠNÂˆY‹OœÚY]^H
+›[HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÚÚ[—Ú[™š[Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”ÚÚ[ˆ[™HÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+Y\ÝH[™HÚYÙˆHÙ[XÝYÚÚ[ˆ]ËˆŠNÂˆY‹OœÚY]^H
+›[HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+œÚÙ[]Û—Ú[™š[Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”ÚÙ[]Ûˆ[™HÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+Y\ÝH[™HÚYÙˆHÙ[XÝYÚÙ[]Ûˆ]ËˆŠNÂˆY‹OœÚY]^H
+›[HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+LYJJNÂ‚ˆYˆH\ËO˜Y
+œÞ[[Y]šX×Ú[™š[ÞWØ^\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Þ[[Y]šXÈ[™š[H^\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+’YˆH[Ù[\ÈÛÈ\È]\™HÞ[[Y]šXÈX›Ý]HH^\Ë‚ˆˆ[™[ÝHØ[\ÙH\ÈÈ]™HÞ[[Y]šXÈ^\™\ËX\ÙHÛXÚÈ\ÈÜ[ÛˆÛˆÛ™HÙˆH\ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆËÈÜ˜ØNˆX^^Y\ˆZYÚ›ÜˆÛÛXš[™Y[™š[ˆYˆH\ËO˜Y
+š[™š[ØÛÛXš[˜][Û—ÛX^Û^Y\—ÚZYÚ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[™š[ÛÛXš[˜][ÛˆHX^^Y\ˆZYÚŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+“X^[][H^Y\ˆZYÚ›ÜˆHÛÛXš[™YÜ\œÙH[™š[——ˆ‚ˆ”Ù]]ÈÜˆL	HÈ\ÙHH›Þž›HX[Y]\ˆ
+›ÜˆX^[][H™YXÝ[Ûˆ[ˆš[[YJHÜˆH˜[YHÙˆŽ	HÈX^[Z^™HÜ\œÙH[™š[Ý™[™Ý——ˆ‚ˆ•H[X™\ˆÙˆ^Y\œÈÝ™\ˆÚXÚ[™š[\ÈÛÛXš[™Y\È\š]™YžH]šY[™È\È˜[YHÚ]H^Y\ˆZYÚ[™›Ý[™YÝÛˆÈH™X\™\ÝXÚ[X[——ˆ‚ˆ•\ÙHZ]\ˆXœÛÛ]H[H˜[Y\È
+YËˆŒÌ›[H›ÜˆH[H›Þž›JHÜˆ	H˜[Y\È
+YÈ	JKˆ\È˜[YH]\Ý›Ý™H\™Ù\ˆ‚ˆ[ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+L‹YJJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[Ùš[[Y[‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+’[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+‘^Y\œÈŠNÂˆY‹OÛÛ\H
+‘š[[Y[Èš[[\›˜[Ü\œÙH[™š[ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚYÙˆ[\›˜[Ü\œÙH[™š[ˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+š[™š[ÝØ[ÛÝ™\›\‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+’[™š[ÕØ[Ý™\›\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+’[™š[\™XH\È[›\™ÙYÛYÚHÈÝ™\›\Ú]Ø[›Üˆ™]\ˆ›Û™[™Ëˆ‚ˆ•H\˜Ù[YÙH˜[YH\È™[]]™HÈ[™HÚYÙˆÜ\œÙH[™š[ˆ‚ˆ”Ù]\È˜[YHÈŒLLMIHÈZ[š[Z^™HÝ[X[Ý™\ˆ^\Ú[Ûˆ[™XØÝ[][][ÛˆÙˆ‚ˆ›X]\šX[™\Ý[[™È[ˆ›ÝYÚÜÝ\™˜XÙ\ËˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹Oœ˜][×ÛÝ™\ˆHš[›™\—ÝØ[Û[™WÝÚYŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+MJJNÂˆˆYˆH\ËO˜Y
+ÜØ›ÝÛWÚ[™š[ÝØ[ÛÝ™\›\‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+•ÜÐ›ÝÛHÛÛY[™š[ÝØ[Ý™\›\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+•ÜÛÛY[™š[\™XH\È[›\™ÙYÛYÚHÈÝ™\›\Ú]Ø[›Üˆ™]\ˆ›Û™[™È‚ˆ˜[™ÈZ[š[Z^™HH\X\˜[˜ÙHÙˆ[šÛ\ÈÚ\™HHÜ[™š[YY]ÈHØ[Ëˆ‚ˆH˜[YHÙˆKLÌ	H\ÈHÛÛÙÝ\[™ÈÚ[Z[š[Z^š[™ÈH\X\˜[˜ÙHÙˆ[šÛ\Ëˆ‚ˆ•H\˜Ù[YÙH˜[YH\È™[]]™HÈ[™HÚYÙˆÜ\œÙH[™š[ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹Oœ˜][×ÛÝ™\ˆHš[›™\—ÝØ[Û[™WÝÚYŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+œÜ\œÙWÚ[™š[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ü\œÙH[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆ[\›˜[Ü\œÙH[™š[ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+š[š\š]È‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+’[š\š]È›Ùš[HŠNÂˆY‹OÛÛ\H
+“˜[YHÙˆ\™[›Ùš[KˆŠNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆËÈH›ÛÝÚ[™È˜[YH\ÈÈ™HÝÜ™Y[ÈH›Ú™XÝš[H
+SQ‹ÓQ‹ÛÛ™šYÈ‹‹ŠBˆËÈ[™]ÛÛZ[œÈHÝ[HÙˆš[š\š]Èˆ˜[Y\ÈÝ™\ˆHš[[™š[[Y[›Ùš[\Ë‚ˆYˆH\ËO˜Y
+š[š\š]×ÙÜ›Ý\‹ÛÔÝš[™ÜÊNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+š[\™˜XÙWÜÚ[È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[\™˜XÙHÚ[ÈŠNÂˆY‹OÛÛ\H
+‘›Ü˜ÙHHÙ[™\˜][ÛˆÙˆÛÛYÚ[È™]ÙY[ˆY˜XÙ[X]\šX[ËÝ›Û[Y\Ëˆ‚ˆ•\ÙY[›Üˆ][KY^Y\ˆš[ÈÚ]˜[œÛXÙ[X]\šX[ÈÜˆX[X[ÛÛX›H‚ˆœÝ\ÜX]\šX[ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›[]WÜÙYÛY[YÜ™YÚ[Û—ÛX^ÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^[][HÚYÙˆHÙYÛY[Y™YÚ[ÛˆŠNÂˆY‹OÛÛ\H
+“X^[][HÚYÙˆHÙYÛY[Y™YÚ[Û‹ˆ™\›È\ØX›\È\È™X]\™KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+›[]WÜÙYÛY[YÜ™YÚ[Û—Ú[\›ØÚÚ[™×Ù\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›ØÚÚ[™È\ÙˆHÙYÛY[Y™YÚ[ÛˆŠNÂˆY‹OÛÛ\H
+’[\›ØÚÚ[™È\ÙˆHÙYÛY[Y™YÚ[Û‹ˆ]Ú[™HYÛ›Ü™YYˆ‚ˆ—›[]WÜÙYÛY[YÜ™YÚ[Û—ÛX^ÝÚYˆ\È™\›ÈÜˆYˆ›[]WÜÙYÛY[YÜ™YÚ[Û—Ú[\›ØÚÚ[™×Ù\ˆ‚ˆš\ÈšYÙÙ\ˆ[ˆ›[]WÜÙYÛY[YÜ™YÚ[Û—ÛX^ÝÚY‹ˆ™\›È\ØX›\È\È™X]\™KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][ÛˆˆY‹O›Z[ˆHÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×Ø™X[H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•\ÙH™X[H[\›ØÚÚ[™ÈŠNÂˆY‹OÛÛ\H
+‘Ù[™\˜]H[\›ØÚÚ[™È™X[HÝXÝ\™H]HØØ][ÛœÈÚ\™HY™™\™[š[[Y[ÈÝXÚˆ\È[\›Ý™\ÈHY\Ú[Ûˆ™]ÙY[ˆš[[Y[Ë\ÜXÚX[H[Ù[Èš[Y[ˆY™™\™[X]\šX[ËˆŠNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×Ø™X[WÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›ØÚÚ[™È™X[HÚYŠNÂˆY‹OÛÛ\H
+•HÚYÙˆH[\›ØÚÚ[™ÈÝXÝ\™H™X[\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHŒNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Ž
+JNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×ÛÜšY[][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›ØÚÚ[™È\™XÝ[ÛˆŠNÂˆY‹OÛÛ\H
+“ÜšY[][ÛˆÙˆ[\›ØÚÈ™X[\ËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÍŒÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ‹JJNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×Ø™X[WÛ^Y\—ØÛÝ[‹ÛÒ[
+NÂˆY‹O›X™[H
+’[\›ØÚÚ[™È™X[H^Y\œÈŠNÂˆY‹OÛÛ\H
+•HZYÚÙˆH™X[\ÈÙˆH[\›ØÚÚ[™ÈÝXÝ\™KYX\Ý\™Y[ˆ[X™\ˆÙˆ^Y\œËˆ\ÜÈ^Y\œÈ\ÈÝ›Û™Ù\‹][Ü™H›Û™HÈY™XÝËˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+ŠJNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×Ù\‹ÛÒ[
+NÂˆY‹O›X™[H
+’[\›ØÚÚ[™È\ŠNÂˆY‹OÛÛ\H
+•H\Ý[˜ÙHœ›ÛHH›Ý[™\žH™]ÙY[ˆš[[Y[ÈÈÙ[™\˜]H[\›ØÚÚ[™ÈÝXÝ\™KYX\Ý\™Y[ˆÙ[ËˆÛÈ™]ÈÙ[ÈÚ[™\Ý[[ˆÛÜˆY\Ú[Û‹ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O˜Ø]YÛÜžHH
+Y˜[˜ÙYŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+ŠJNÂ‚ˆYˆH\ËO˜Y
+š[\›ØÚÚ[™×Ø›Ý[¶ß­z¶‰žËkºwµçYY‹O›X™[H
+“Z[š[][HÜ\œÙH[™š[™\ÚÛŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+”Ü\œÙH[™š[\™XHÚXÚ\ÈÛX[\ˆ[ˆ™\ÚÛ˜[YH\È™\XÙYžH[\›˜[ÛÛY[™š[ˆŠNÂˆY‹OœÚY]^H›[p¬ˆŽÂKËÈÜ]X\™HZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+MJJNÂ‚ˆYˆH\ËO˜Y
+œÛÛYÚ[™š[Ùš[[Y[‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+”ÛÛY[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+‘^Y\œÈŠNÂˆY‹OÛÛ\H
+‘š[[Y[Èš[ÛÛY[™š[ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ÜÛÛYÚ[™š[Û[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+’[\›˜[ÛÛY[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚYÙˆ[\›˜[ÛÛY[™š[ˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+š[\›˜[ÜÛÛYÚ[™š[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+’[\›˜[ÛÛY[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆ[\›˜[ÛÛY[™š[›ÝHÜ[™›ÝÛHÝ\™˜XÙKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+œÜ\˜[Û[ÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ü\˜[˜\ÙHŠNÂˆY‹OÛÛ\H
+”Ü\˜[^™HÛ[ÛÝÈÝ]Hˆ[Ý™\ÈÙˆHÝ]\ˆÛÛÝ\‹ˆ‚ˆ[™\›œÈHÛÛY[Ù[[ÈHÚ[™ÛHØ[Yš[Ú]ÛÛY›ÝÛH^Y\œËˆ‚ˆ•Hš[˜[Ù[™\˜]Y[Ù[\È›ÈÙX[KˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÜ\˜[Û[ÙWÜÛ[ÛÝ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Û[ÛÝÜ\˜[ŠNÂˆY‹OÛÛ\H
+”Û[ÛÝÜ\˜[Û[ÛÝÈÝ][™H[Ý™\È\ÈÙ[‚ˆœ™\Ý[[™È[ˆ›Èš\ÚX›HÙX[H][]™[ˆ[ˆHH\™XÝ[ÛœÈÛˆØ[È]\™H›Ý™\XØ[ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÜ\˜[Û[ÙWÛX^ÞWÜÛ[ÛÝ[™È‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+“X^HÛ[ÛÝ[™ÈŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+“X^[][H\Ý[˜ÙHÈ[Ý™HÚ[È[ˆHÈžHÈXÚY]™HHÛ[ÛÝÜ\˜[ˆ‚ˆ’Yˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆ›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+ŒYJJNÂ‚ˆYˆH\ËO˜Y
+œÜ\˜[ÜÝ\[™×Ù›Ý×Ü˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ü\˜[Ý\[™È›ÝÈ˜][ÈŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+”Ù]ÈHÝ\[™È›ÝÈ˜][ÈÚ[H˜[œÚ][Ûš[™Èœ›ÛHH\Ý›ÝÛH^Y\ˆÈHÜ\˜[ˆ‚ˆ“›Ü›X[HHÜ\˜[˜[œÚ][ÛˆØØ[\ÈH›ÝÈ˜][Èœ›ÛH	HÈL	H\š[™ÈHš\œÝÛÜ‚ˆÚXÚØ[ˆ[ˆÛÛYHØ\Ù\ÈXYÈ[™\ˆ^\Ú[Ûˆ]HÝ\ÙˆHÜ\˜[ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂ‚ˆYˆH\ËO˜Y
+œÜ\˜[Ùš[š\Ú[™×Ù›Ý×Ü˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ü\˜[š[š\Ú[™È›ÝÈ˜][ÈŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+”Ù]ÈHš[š\Ú[™È›ÝÈ˜][ÈÚ[H[™[™ÈHÜ\˜[ˆ‚ˆ“›Ü›X[HHÜ\˜[˜[œÚ][ÛˆØØ[\ÈH›ÝÈ˜][Èœ›ÛHL	HÈ	H\š[™ÈH\ÝÛÜ‚ˆÚXÚØ[ˆ[ˆÛÛYHØ\Ù\ÈXYÈ[™\ˆ^\Ú[Ûˆ]H[™ÙˆHÜ\˜[ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂ‚ˆYˆH\ËO˜Y
+[Y[\ÙWÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+•[Y[\ÙHŠNÂˆY‹OÛÛ\H
+’YˆÛ[ÛÝÜˆ˜Y][Û˜[[ÙH\ÈÙ[XÝYH[Y[\ÙHšY[ÈÚ[™HÙ[™\˜]Y›ÜˆXXÚš[ˆ‚ˆY\ˆXXÚ^Y\ˆ\Èš[YHÛ˜\ÚÝ\ÈZÙ[ˆÚ]HÚ[X™\ˆØ[Y\˜Kˆ‚ˆ[Ùˆ\ÙHÛ˜\ÚÝÈ\™HÛÛ\ÜÙY[ÈH[Y[\ÙHšY[ÈÚ[ˆš[[™ÈÛÛ\]\Ëˆ‚ˆ’YˆÛ[ÛÝ[ÙH\ÈÙ[XÝYHÛÛXYÚ[[Ý™HÈH^Ù\ÜÈÚ]HY\ˆXXÚ^Y\ˆ\Èš[Y‚ˆ˜[™[ˆZÙHHÛ˜\ÚÝˆ‚ˆ”Ú[˜ÙHHY[š[[Y[X^HXZÈœ›ÛHH›Þž›H\š[™ÈH›ØÙ\ÜÈÙˆZÚ[™ÈHÛ˜\ÚÝ‚ˆœš[YHÝÙ\ˆ\È™\]Z\™Y›ÜˆÛ[ÛÝ[ÙHÈÚ\H›Þž›KˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŒŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊŒHŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+•˜Y][Û˜[ŠJNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ
+”Û[ÛÝŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŠ˜Y][Û˜[
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ[™žWÝ[\\˜]\™WÙ[H‹ÛÒ[
+NÂˆY‹O›X™[H
+•[\\˜]\™H˜\šX][ÛˆŠNÂˆËÈ“ˆš[Ù][™ÜÈˆ“ÛÞ™H™]™[[Ûˆˆˆ•[\\˜]\™H˜\šX][Ûˆ‚ˆY‹OÛÛ\H
+•[\\˜]\™HY™™\™[˜ÙHÈ™H\YYÚ[ˆ[ˆ^Y\ˆ\È›ÝXÝ]™Kˆ‚ˆ•H˜[YH\È›Ý\ÙYÚ[ˆ	ÚYWÝ[\\˜]\™IÈ[ˆš[[Y[Ù][™ÜÈ‚ˆš\ÈÙ]È›Û‹^™\›È˜[YKˆŠNÂˆY‹OœÚY]^HN¸¢!—LŒLÈŽÂKËÈ[HYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆH[X^Ý[\ÂˆY‹O›X^HX^Ý[\ÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+MJJNÂ‚ˆYˆH\ËO˜Y
+œ™ZX]Ý[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”™ZX][YHŠNÂˆY‹OÛÛ\H
+•È™YXÙHHØZ][™È[YHY\ˆÛÛÚ[™ÙKÜ˜ØHØ[ˆ™ZX]H™^ÛÛÚ[HHÝ\œ™[ÛÛ\ÈÝ[[ˆ\ÙKˆ‚ˆ•\ÈÙ][™ÈÜXÚYšY\ÈH[YH[ˆÙXÛÛ™ÈÈ™ZX]H™^ÛÛˆÜ˜ØHÚ[[œÙ\HLLÛÛ[X[™È™ZX]HÛÛ[ˆY˜[˜ÙKˆŠNÂˆY‹OœÚY]^HœÈŽÂKËÈÙXÛÛ™ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ÌŒ
+JNÂ‚‚ˆYˆH\ËO˜Y
+™[WÝ[\\˜]\™H‹ÛÒ[
+NÂˆY‹O›X™[H
+”™ZX][H[\\˜]\™HŠNÂˆY‹OÛÛ\H
+[ÝÈ\Ù\ˆÈÙ]H™ZX][\\˜]\™KˆYˆ\™Ù][\\˜]\™H\ÈŒŒ[™™ZX][H[\\˜]\™H\ÈLÌ[ˆ‚ˆH™ZX][\\˜]\™HÚ[™HNLŠNÂˆY‹OœÚY]^H¸¢!°¬ÈŽÂˆY‹O›Z[ˆHMLÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚‚ˆYˆH\ËO˜Y
+œ™ZX]ÜÝ\È‹ÛÒ[
+NÂˆY‹O›X™[H
+”™ZX]Ý\ÈŠNÂˆY‹OÛÛ\H
+’[œÙ\][\H™ZX]ÛÛ[X[™È
+K™ËˆLLŒJKˆÛ›H\ÙY[›Üˆ\ØHˆ›ÜˆÝ\ˆš[\œËX\ÙHÙ]]ÈKˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚‚ˆYˆH\ËO˜Y
+›XXÚ[™WÜÝ\ÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”Ý\ËXÛÙHŠNÂˆY‹OÛÛ\H
+”Ý\ËXÛÙHÚ[ˆÝ\[™ÈH[\™Hš[ˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê‘ÌŽÈÛYH[^\×‘ÌHHLÈY›Þž›WˆŠJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÜÝ\ÙØÛÙH‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”Ý\ËXÛÙHŠNÂˆY‹OÛÛ\H
+”Ý\ËXÛÙHÚ[ˆÝ\[™ÈHš[[™ÈÙˆ\Èš[[Y[ˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHLŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÈÈˆˆJNÂ‚ˆYˆH\ËO˜Y
+œÚ[™ÛWÙ^Y\—Û][WÛX]\šX[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ú[™ÛH^Y\ˆ][HX]\šX[ŠNÂˆY‹OÛÛ\H
+•\ÙHÚ[™ÛH›Þž›HÈš[][Hš[[Y[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+›X[X[Ùš[[Y[ØÚ[™ÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“X[X[š[[Y[Ú[™ÙHŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[ÛˆÈÛZ]HÝ\ÝÛHÚ[™ÙHš[[Y[ËXÛÙHÛ›H]H™YÚ[›š[™ÈÙˆHš[ˆ‚ˆ•HÛÛÚ[™ÙHÛÛ[X[™
+K™Ë‹
+HÚ[™HÚÚ\Y›ÝYÚÝ]H[\™Hš[ˆ‚ˆ•\È\È\ÙY[›ÜˆX[X[][K[X]\šX[š[[™ËÚ\™HÙH\ÙHMŒÔUTÑHÈšYÙÙ\ˆHX[X[š[[Y[Ú[™ÙHXÝ[Û‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œ\™ÙWÚ[—Üš[YWÝÝÙ\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”\™ÙH[ˆš[YHÝÙ\ˆŠNÂˆY‹OÛÛ\H
+”\™ÙH™[XZ[š[™Èš[[Y[[Èš[YHÝÙ\‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÙš[[Y[Ü˜[[Z[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[˜X›Hš[[Y[˜[[Z[™ÈŠNÂˆY‹OÛÛ\H
+‘[˜X›Hš[[Y[˜[[Z[™ÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œ˜[[Z[™×Û[™WÝÚYÜ˜][È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”˜[[Z[™È[™HÚY˜][ÈŠNÂˆY‹OÛÛ\H
+ˆ•\È\È\ÙYÈXÚYHH[™HÚYÙˆÚ\HÝÙ\ˆÚ[ˆ˜[[Z[™Ë˜[[Z[™È[™HÚYHÝ\È˜][×H
+ˆ^Y\ˆ
+ˆKŒHŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹Œ
+JNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WØÚ[™ÙWÜ™\ÜÝ\™WÝÚ[—ÝÚ\[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[˜X›HÚ[™ÙH™\ÜÝ\™HY˜[˜ÙHÚ[ˆÚ\[™ÈŠNÂˆY‹OÛÛ\H
+’Yˆ]	ÜÈÙ]È˜[ÙKH™\ÜÝ\™HY˜[˜ÙH˜[YHÚ[›Ý™HÚ[™ÙYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œ˜[[Z[™×Ü™\ÜÝ\™WØY˜[˜ÙWÝ˜[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”™\ÜÝ\™HY˜[˜ÙH˜[YHÚ[ˆ˜[[Z[™ÈŠNÂˆY‹OÛÛ\H
+”Ù]Ô™\ÜÝ\™WØY˜[˜ÙHÝ\È˜[YWHÚ[ˆ˜[[Z[™ÈÛˆÚ\HÝÙ\ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Û›×ÜÜ\œÙWÛ^Y\œÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“›ÈÜ\œÙH^Y\œÈ
+™]JHŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›YHÚ\HÝÙ\ˆÚ[›Ý™Hš[YÛˆ^Y\œÈÚ]›ÈÛÛÚ[™Ù\Ëˆ‚ˆ“Ûˆ^Y\œÈÚ]HÛÛÚ[™ÙK^Y\ˆÚ[˜]™[ÝÛØ\™Èš[HÚ\HÝÙ\‹ˆ‚ˆ•\Ù\ˆ\È™\ÜÛœÚX›H›Üˆ[œÝ\š[™È\™H\È›ÈÛÛ\Ú[ÛˆÚ]Hš[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÚ[™ÛWÙ^Y\—Û][WÛX]\šX[Üš[Z[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”š[YH[š[[™È^Y\œÈŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y[š[[™È^Y\œÈÚ[™Hš[YY]Hœ›ÛYÙHÙˆHš[™Y]HÝ\ÙˆHš[ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÛXÙWØÛÜÚ[™×Ü˜Y]\È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ÛXÙHØ\ÛÜÚ[™È˜Y]\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+Ü˜XÚÜÈÛX[\ˆ[ˆžØ\ÛÜÚ[™È˜Y]\È\™H™Z[™Èš[Y\š[™ÈHšX[™ÛHY\ÚÛXÚ[™Ëˆ‚ˆ•HØ\ÛÜÚ[™ÈÜ\˜][ÛˆX^H™YXÙHHš[˜[š[™\ÛÛ][Û‹\™Y›Ü™H]\ÈYš\ØX›HÈÙY\H˜[YH™X\ÛÛ˜X›HÝËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒJJNÂ‚ˆYˆH\ËO˜Y
+œÛXÚ[™×Û[ÙH‹ÛÑ[[JNÂˆY‹O›X™[H
+”ÛXÚ[™È[ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+“Ý\ˆŠNÂˆY‹OÛÛ\H
+•\ÙH‘]™[‹[Ùˆ›ÜˆÑX”š[Z\œ[™H[Ù[Ëˆ\ÙHÛÜÙHÛ\×ˆÈÛÜÙH[Û\È[ˆH[Ù[ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÛXÚ[™Ó[ÙOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™YÝ[\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™]™[—ÛÙŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÜÙWÚÛ\ÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™YÝ[\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘]™[‹[ÙŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÜÙHÛ\ÈŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÛXÚ[™Ó[ÙOŠÛXÚ[™Ó[ÙNŽ”™YÝ[\ŠJNÂ‚ˆYˆH\ËO˜Y
+ž—ÛÙ™œÙ]‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+–ˆÙ™œÙ]ŠNÂˆY‹OÛÛ\H
+•\È˜[YHÚ[™HYY
+ÜˆÝX˜XÝY
+Hœ›ÛH[HˆÛÛÜ™[˜]\È‚ˆš[ˆHÝ]]ËXÛÙKˆ]\È\ÙYÈÛÛ\[œØ]H›Üˆ˜Yˆ[™ÝÜÜÚ][ÛŽˆ‚ˆ™›Üˆ^[\KYˆ[Ý\ˆ[™ÝÜ™\›ÈXÝX[HX]™\ÈH›Þž›HŒÛ[H˜\ˆ‚ˆ™œ›ÛHHš[™YÙ]\ÈÈLŒÈ
+Üˆš^[Ý\ˆ[™ÝÜ
+KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂˆˆYˆH\ËO˜Y
+™[˜X›WÜÝ\Ü‹ÛÐ›ÛÛ
+NÂˆËÐ”Îˆ™[[Ý™HX]\šX[™Z[™Ý\ÜˆY‹O›X™[H
+‘[˜X›HÝ\ÜŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘[˜X›HÝ\ÜÙ[™\˜][Û‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÝ\H‹ÛÑ[[JNÂˆY‹O›X™[H
+•\HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“›Ü›X[
+]]ÊH[™™YH
+]]ÊH\™H\ÙYÈÙ[™\˜]HÝ\Ü]]ÛX]XØ[Kˆ‚ˆ’Yˆ›Ü›X[
+X[X[
+HÜˆ™YH
+X[X[
+H\ÈÙ[XÝYÛ›HÝ\Ü[™›Ü˜Ù\œÈ\™HÙ[™\˜]YˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÝ\Ü\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››Ü›X[
+]]ÊHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™YJ]]ÊHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ››Ü›X[
+X[X[
+HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™YJX[X[
+HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›Ü›X[
+]]ÊHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•™YH
+]]ÊHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“›Ü›X[
+X[X[
+HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•™YH
+X[X[
+HŠJNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÝ\Ü\OŠÝ›Ü›X[]]ÊJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛØš™XÝÞWÙ\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ý\ÜÛØš™XÝH\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+–HÙ\\˜][Ûˆ™]ÙY[ˆ[ˆØš™XÝ[™]ÈÝ\ÜˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆËÔÝ\ÜÚ]ÛÈÛX[ÜXÚ[™ÈX^HÝXÚHØš™XÝ[™Y™šXÝ[È™[[Ý™K‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒÍJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛØš™XÝÙš\œÝÛ^Y\—ÙØ\‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ý\ÜÛØš™XÝš\œÝ^Y\ˆØ\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+–HÙ\\˜][Ûˆ™]ÙY[ˆ[ˆØš™XÝ[™]ÈÝ\Ü]Hš\œÝ^Y\‹ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆËÔÝ\ÜÚ]ÛÈÛX[ÜXÚ[™ÈX^HÝXÚHØš™XÝ[™Y™šXÝ[È™[[Ý™K‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”]\›ˆ[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÙH\ÈÙ][™ÈÈ›Ý]HHÝ\Ü]\›ˆÛˆHÜš^›Û[[™KˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HÍNNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛÛ—ØZ[Ü]WÛÛ›H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“ÛˆZ[]HÛ›HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘Û‰ÝÜ™X]HÝ\ÜÛˆ[Ù[Ý\™˜XÙKÛ›HÛˆZ[]KˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+œÝ\ÜØÜš]XØ[Ü™YÚ[Ûœ×ÛÛ›H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ý\ÜÜš]XØ[™YÚ[ÛœÈÛ›HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“Û›HÜ™X]HÝ\Ü›ÜˆÜš]XØ[™YÚ[ÛœÈ[˜ÛY[™ÈÚ\œZ[Ø[[]™\‹]ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜ™[[Ý™WÜÛX[ÛÝ™\š[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™[[Ý™HÛX[Ý™\š[™ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”™[[Ý™HÛX[Ý™\š[™ÜÈ]ÜÜÚX›H™YY›ÈÝ\ÜËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆËÈ”ÎˆÚ[™ÙH\HÈÛÛ[[Ûˆ›Ø]‚ˆËÈ]X^H™H›Ý[™YÈ][]H^Y\ˆZYÚÚ[ˆ[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚ\È˜[ÙK‚ˆYˆH\ËO˜Y
+œÝ\ÜÝÜÞ—Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ™—Ù[[WÛÜ[ŽÂˆY‹O›X™[H
+•Üˆ\Ý[˜ÙHŠNÂˆY‹O›Z[ˆHÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•HˆØ\™]ÙY[ˆHÜÝ\Ü[\™˜XÙH[™Øš™XÝˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚‹ËÈY‹O›Z[ˆHÂˆÚYˆˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒŒHŠNÂˆËÙY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒŒˆŠNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Œ
+ÛÛX›JHŠJNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ŒŒH
+Ù[ZKY]XÚX›JHŠJNÂˆËÙY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ŒŒˆ
+]XÚX›JHŠJNÂˆÙ[™Y‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ›ÝÛWÞ—Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+›ÝÛHˆ\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•HˆØ\™]ÙY[ˆH›ÝÛHÝ\Ü[\™˜XÙH[™Øš™XÝˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+™[™›Ü˜ÙWÜÝ\ÜÛ^Y\œÈ‹ÛÒ[
+NÂˆËÙY‹O›X™[H
+‘[™›Ü˜ÙHÝ\Ü›ÜˆHš\œÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆËÙY‹OÛÛ\H
+‘Ù[™\˜]HÝ\ÜX]\šX[›ÜˆHÜXÚYšYY[X™\ˆÙˆ^Y\œÈÛÝ[[™Èœ›ÛH›ÝÛK‚ˆËÈœ™YØ\™\ÜÈÙˆÚ]\ˆ›Ü›X[Ý\ÜX]\šX[\È[˜X›YÜˆ›Ý[™™YØ\™\ÜÈ‚ˆËÈ›Ùˆ[žH[™ÛH™\ÚÛˆ\È\È\ÙY[›ÜˆÙ][™È[Ü™HY\Ú[ÛˆÙˆØš™XÝÈ‚ˆËÈš]š[™ÈH™\žH[ˆÜˆÛÜˆ›ÛÝš[ÛˆHZ[]KˆŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÂˆËÙY‹O™[ÛX™[H
+‘[™›Ü˜ÙHÝ\Ü›ÜˆHš\œÝˆ^Y\œÈŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÙš[[Y[‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+”Ý\ÜÜ˜Y˜\ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘š[[Y[Èš[Ý\Ü˜\ÙH[™˜Yˆ‘Y˜][ˆYX[œÈ›ÈÜXÚYšXÈš[[Y[›ÜˆÝ\Ü[™Ý\œ™[š[[Y[\È\ÙYˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÛ›ÝÙ›Ü—Ø›ÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+]›ÚY[\™˜XÙHš[[Y[›Üˆ˜\ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+]›ÚY\Ú[™ÈÝ\Ü[\™˜XÙHš[[Y[Èš[Ý\Ü˜\ÙHYˆÜÜÚX›KˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛ[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”Ý\ÜŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚYÙˆÝ\ÜˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÛÛÜÜ]\›ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[\™˜XÙH\ÙHÛÜ]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+ÛÝ™\ˆHÜÛÛXÝ^Y\ˆÙˆHÝ\ÜÈÚ]ÛÜËˆ\ØX›YžHY˜][ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÙš[[Y[‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+”Ý\ÜÜ˜Y[\™˜XÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘š[[Y[Èš[Ý\Ü[\™˜XÙKˆ‘Y˜][ˆYX[œÈ›ÈÜXÚYšXÈš[[Y[›ÜˆÝ\Ü[\™˜XÙH[™Ý\œ™[š[[Y[\È\ÙYˆŠNÂˆY‹O›Z[ˆHÂˆËÈ”ÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆ]]ÈÝ\ÜÚ[\™˜XÙWÝÜÛ^Y\œÈHYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÝÜÛ^Y\œÈ‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+•Ü[\™˜XÙH^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆÜ[\™˜XÙH^Y\œËˆŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÂˆY‹O›Z[ˆHÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊŒÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒHŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊŒÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+ÊJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWØ›ÝÛWÛ^Y\œÈ‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+›ÝÛH[\™˜XÙH^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆ›ÝÛH[\™˜XÙH^Y\œËˆŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÂˆY‹O›Z[ˆHLNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‹LHŠNÂˆ\[™
+Y‹O™[[WÝ˜[Y\ËÝ\ÜÚ[\™˜XÙWÝÜÛ^Y\œËO™[[WÝ˜[Y\ÊNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”Ø[YH\ÈÜŠJNÂˆ\[™
+Y‹O™[[WÛX™[ËÝ\ÜÚ[\™˜XÙWÝÜÛ^Y\œËO™[[WÛX™[ÊNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÜÜXÚ[™È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ü[\™˜XÙHÜXÚ[™ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”ÜXÚ[™ÈÙˆ[\™˜XÙH[™\Ëˆ™\›ÈYX[œÈÛÛY[\™˜XÙK—ˆ‚ˆ‘›Ü˜ÙH\Ú[™ÈÛÛY[\™˜XÙHÚ[ˆÝ\Ü\›Ûš[™È\È[˜X›YˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆËÐ”ÂˆYˆH\ËO˜Y
+œÝ\ÜØ›ÝÛWÚ[\™˜XÙWÜÜXÚ[™È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+›ÝÛH[\™˜XÙHÜXÚ[™ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”ÜXÚ[™ÈÙˆ›ÝÛH[\™˜XÙH[™\Ëˆ™\›ÈYX[œÈÛÛY[\™˜XÙKˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ý\Ü[\™˜XÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆÝ\Ü[\™˜XÙKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ˜\ÙWÜ]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+˜\ÙH]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆÙˆÝ\ÜˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™Y˜][ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\‹YÜšYŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšÛ™^XÛÛXˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›YÚš[™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊšÛÝÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘Y˜][ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆÜšYŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’Û™^XÛÛXˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“YÚš[™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+’ÛÝÈŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[]\›ŠÛ\Y˜][
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ[\™˜XÙWÜ]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+’[\™˜XÙH]\›ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+“[™H]\›ˆÙˆÝ\Ü[\™˜XÙKˆ‚ˆ‘Y˜][]\›ˆ›Üˆ›Û‹\ÛÛX›HÝ\Ü[\™˜XÙH\È™XÝ[[™X\‹‚ˆÚ[HY˜][]\›ˆ›ÜˆÛÛX›HÝ\Ü[\™˜XÙH\ÈÛÛ˜Ù[šXËˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[[\™˜XÙT]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜]]ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÛ˜Ù[šXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\—Ú[\›XÙYŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™ÜšYŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘Y˜][ŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛ˜Ù[šXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆ[\›XÙYŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘ÜšYŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[[\™˜XÙT]\›ŠÛZ\]]ÊJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ˜\ÙWÜ]\›—ÜÜXÚ[™È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+˜\ÙH]\›ˆÜXÚ[™ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”ÜXÚ[™È™]ÙY[ˆÝ\Ü[™\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹JJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÙ^[œÚ[Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“›Ü›X[Ý\Ü^[œÚ[ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+‘^[™
+
+ÊHÜˆÚš[šÈ
+JHHÜš^›Û[Ü[ˆÙˆ›Ü›X[Ý\ÜˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ý\ÜŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆÝ\ÜˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜÝ[H‹ÛÑ[[JNÂˆY‹O›X™[H
+”Ý[HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”Ý[H[™Ú\HÙˆHÝ\Üˆ›Üˆ›Ü›X[Ý\Ü›Ú™XÝ[™ÈHÝ\ÜÈ[ÈH™YÝ[\ˆÜšY‚ˆÚ[Ü™X]H[Ü™HÝX›HÝ\ÜÈ
+Y˜][
+KÚ[HÛYÈÝ\ÜÝÙ\œÈÚ[Ø]™HX]\šX[[™™YXÙH‚ˆ›Øš™XÝØØ\œš[™Ë—ˆ‚ˆ‘›Üˆ™YHÝ\ÜÛ[H[™Ü™Ø[šXÈÝ[HÚ[Y\™ÙHœ˜[˜Ú\È[Ü™HYÙÜ™\ÜÚ]™[H[™Ø]™H‚ˆ˜HÝÙˆX]\šX[
+Y˜][Ü™Ø[šXÊKÚ[HXœšYÝ[HÚ[Ü™X]HÚ[Z[\ˆÝXÝ\™HÈ›Ü›X[Ý\Ü‚ˆ[™\ˆ\™ÙH›]Ý™\š[™ÜËˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[Ý[OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™Y˜][ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™ÜšYŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÛYÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›Ü™Ø[šXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™YWÜÛ[HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™YWÜÝ›Û™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™YWÚXœšYŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘Y˜][
+ÜšYÓÜ™Ø[šXÊHŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘ÜšYŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”ÛYÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+“Ü™Ø[šXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•™YHÛ[HŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•™YHÝ›Û™ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+•™YHXœšYŠJNÂ‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÝ\ÜX]\šX[Ý[OŠÛ\ÑY˜][
+JNÂ‚ˆYˆH\ËO˜Y
+š[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[™\[™[Ý\Ü^Y\ˆZYÚŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”Ý\Ü^Y\ˆ\Ù\È^Y\ˆZYÚ[™\[™[Ú]Øš™XÝ^Y\‹ˆ\È\ÈÈÝ\ÜÝ\ÝÛZ^š[™È‹YØ\[™Ø]™Hš[[YKˆ‚ˆ•\ÈÜ[ÛˆÚ[™H[˜[YÚ[ˆHš[YHÝÙ\ˆ\È[˜X›YˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÝ™\ÚÛØ[™ÛH‹ÛÒ[
+NÂˆY‹O›X™[H
+•™\ÚÛ[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+”Ý\ÜÚ[™HÙ[™\˜]Y›ÜˆÝ™\š[™ÜÈÚÜÙHÛÜH[™ÛH\È™[ÝÈH™\ÚÛˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+Ì
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÝ™\ÚÛÛÝ™\›\‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+•™\ÚÛÝ™\›\ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+’Yˆ™\ÚÛ[™ÛH\È™\›ËÝ\ÜÚ[™HÙ[™\˜]Y›ÜˆÝ™\š[™ÜÈÚÜÙHÝ™\›\\È™[ÝÈH™\ÚÛˆHÛX[\ˆ\È˜[YH\ËHÝY\\ˆHÝ™\š[™È]Ø[ˆ™Hš[YÚ]Ý]Ý\ÜˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+L‹YJJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚØ[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜Ú[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈHX^[][HÝ™\š[™È[™ÛH]Hœ˜[˜Ú\ÈÙˆ™YHÝ\Ü\™H[ÝÙYÈXZÙKˆ‚ˆ’YˆH[™ÛH\È[˜Ü™X\ÙYHœ˜[˜Ú\ÈØ[ˆ™Hš[Y[Ü™HÜš^›Û[K[ÝÚ[™È[HÈ™XXÚ˜\\‹ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚØ[™ÛWÛÜ™Ø[šXÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜Ú[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈHX^[][HÝ™\š[™È[™ÛH]Hœ˜[˜Ú\ÈÙˆ™YHÝ\Ü\™H[ÝÙYÈXZÙKˆ‚ˆ’YˆH[™ÛH\È[˜Ü™X\ÙYHœ˜[˜Ú\ÈØ[ˆ™Hš[Y[Ü™HÜš^›Û[K[ÝÚ[™È[HÈ™XXÚ˜\\‹ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØ[™ÛWÜÛÝÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”™Y™\œ™Yœ˜[˜Ú[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆËÈ“ˆš[Ù][™ÜÎˆ“Ü™Ø[šXÈÝ\ÜÈˆˆ”™Y™\œ™Yœ˜[˜Ú[™ÛH‚ˆY‹OÛÛ\H
+•H™Y™\œ™Y[™ÛHÙˆHœ˜[˜Ú\ËÚ[ˆ^HÈ›Ý]™HÈ]›ÚYH[Ù[ˆ‚ˆ•\ÙHHÝÙ\ˆ[™ÛHÈXZÙH[H[Ü™H™\XØ[[™[Ü™HÝX›Kˆ\ÙHHYÚ\ˆ[™ÛH›Üˆœ˜[˜Ú\ÈÈY\™ÙH˜\Ý\‹ˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHLÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚÙ\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜Ú\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈH\Ý[˜ÙH™]ÙY[ˆ™ZYÚ›Üš[™È™YHÝ\Ü›Ù\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHKŒÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚÙ\Ý[˜ÙWÛÜ™Ø[šXÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜Ú\Ý[˜ÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈH\Ý[˜ÙH™]ÙY[ˆ™ZYÚ›Üš[™È™YHÝ\Ü›Ù\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHKŒÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜÝÜÜ˜]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+œ˜[˜Ú[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆËÈ“ˆš[Ù][™ÜÎˆ“Ü™Ø[šXÈÝ\ÜÈˆˆœ˜[˜Ú[œÚ]H‚ˆY‹OÛÛ\H
+Y\ÝÈH[œÚ]HÙˆHÝ\ÜÝXÝ\™H\ÙYÈÙ[™\˜]HH\ÈÙˆHœ˜[˜Ú\Ëˆ‚ˆHYÚ\ˆ˜[YH™\Ý[È[ˆ™]\ˆÝ™\š[™ÜÈ]HÝ\ÜÈ\™H\™\ˆÈ™[[Ý™K‚ˆ\È]\È™XÛÛ[Y[™YÈ[˜X›HÜÝ\Ü[\™˜XÙ\È[œÝXYÙˆHYÚœ˜[˜Ú[œÚ]H˜[YH‚ˆšYˆ[œÙH[\™˜XÙ\È\™H™YYYˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^Û]\˜[HÍNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+Ì
+JNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØY\]™WÛ^Y\—ÚZYÚ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+Y\]™H^Y\ˆZYÚŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘[˜X›[™È\ÈÜ[ÛˆYX[œÈHZYÚÙˆ™YHÝ\Ü^Y\ˆ^Ù\Hš\œÝÚ[™H]]ÛX]XØ[HØ[Ý[]YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+JJNÂˆˆYˆH\ËO˜Y
+™YWÜÝ\ÜØ]]×Øœš[H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+]]Èœš[HÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+‘[˜X›[™È\ÈÜ[ÛˆYX[œÈHÚYÙˆHœš[H›Üˆ™YHÝ\ÜÚ[™H]]ÛX]XØ[HØ[Ý[]YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+JJNÂˆˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœš[WÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœš[HÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹O›Z[ˆHŒÂˆY‹OÛÛ\H
+‘\Ý[˜ÙHœ›ÛH™YHœ˜[˜ÚÈHÝ]\›[ÜÝœš[H[™KˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ÊJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜÝ\ÙX[Y]\ˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•\X[Y]\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆËÈ“ˆš[Ù][™ÜÎˆ“Ü™Ø[šXÈÝ\ÜÈˆˆ•\X[Y]\ˆ‚ˆY‹OÛÛ\H
+œ˜[˜Ú\X[Y]\ˆ›ÜˆÜ™Ø[šXÈÝ\ÜËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHŒYŽÂˆY‹O›X^HL™ŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Ž
+JNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚÙX[Y]\ˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜ÚX[Y]\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈH[š]X[X[Y]\ˆÙˆÝ\Ü›Ù\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHKŒÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚÙX[Y]\—Ø[™ÛH‹ÛÑ›Ø]
+NÂˆËÈ“ˆš[Ù][™ÜÎˆÛQ’VQHˆY‹O›X™[H
+œ˜[˜ÚX[Y]\ˆ[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆËÈ“ˆš[Ù][™ÜÎˆ“Ü™Ø[šXÈÝ\ÜÈˆˆœ˜[˜ÚX[Y]\ˆ[™ÛH‚ˆY‹OÛÛ\H
+•H[™ÛHÙˆHœ˜[˜Ú\ÉÈX[Y]\ˆ\È^HÜ˜YX[H™XÛÛYHXÚÙ\ˆÝØ\™ÈH›ÝÛKˆ‚ˆ[ˆ[™ÛHÙˆÚ[Ø]\ÙHHœ˜[˜Ú\ÈÈ]™H[šY›Ü›HXÚÛ™\ÜÈÝ™\ˆZ\ˆ[™Ýˆ‚ˆHš]Ùˆ[ˆ[™ÛHØ[ˆ[˜Ü™X\ÙHÝXš[]HÙˆHÜ™Ø[šXÈÝ\ÜˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HMNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜØœ˜[˜ÚÙX[Y]\—ÛÜ™Ø[šXÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•™YHÝ\Üœ˜[˜ÚX[Y]\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™È]\›Z[™\ÈH[š]X[X[Y]\ˆÙˆÝ\Ü›Ù\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHKŒÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹ŠJNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜÝØ[ØÛÝ[‹ÛÒ[
+NÂˆY‹O›X™[H
+”Ý\ÜØ[ÛÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™ÈÜXÚYšY\ÈHÛÝ[ÙˆÝ\ÜØ[È[ˆH˜[™ÙHÙˆÌ—KˆYX[œÈ]]ËˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+™YWÜÝ\ÜÝÚ]Ú[™š[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•™YHÝ\ÜÚ][™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•\ÈÙ][™ÈÜXÚYšY\ÈÚ]\ˆÈY[™š[[œÚYH\™ÙHÛÝÜÈÙˆ™YHÝ\ÜˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂˆˆYˆH\ËO˜Y
+œÝ\ÜÚ\›Ûš[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’\›Ûš[™ÈÝ\Ü[\™˜XÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+’\›Ûš[™È\È\Ú[™ÈÛX[›ÝÈÈš[ÛˆØ[YHZYÚÙˆÝ\Ü[\™˜XÙHYØZ[ˆÈXZÙH][Ü™HÛ[ÛÝˆ‚ˆ•\ÈÙ][™ÈÛÛ›ÛÈÚ]\ˆÝ\Ü[\™˜XÙH™Z[™È\›Û™YˆÚ[ˆ[˜X›YÝ\Ü[\™˜XÙHÚ[™H^YY\ÈÛÛYÛËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ\›Ûš[™×Ü]\›ˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+”Ý\Ü\›Ûš[™È]\›ˆŠNÂˆY‹OÛÛ\H
+•H]\›ˆ]Ú[™H\ÙYÚ[ˆ\›Ûš[™ËˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O[™š[]\›ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœ™XÝ[[™X\ˆŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜ÛÛ˜Ù[šXÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+”™XÝ[[™X\ˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+ÛÛ˜Ù[šXÈŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O[™š[]\›Š\™XÝ[[™X\ŠJNÂˆˆYˆH\ËO˜Y
+œÝ\ÜÚ\›Ûš[™×Ù›ÝÈ‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+”Ý\Ü\›Ûš[™È›ÝÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•H[[Ý[ÙˆX]\šX[È^YH\š[™È\›Ûš[™Ëˆ™[]]™HÈ›ÝÈÙˆ›Ü›X[Ý\Ü[\™˜XÙH^Y\ˆZYÚˆ‚ˆ•ÛÈYÚ˜[YH™\Ý[È[ˆÝ™\™^\Ú[ÛˆÛˆHÝ\™˜XÙKˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹Oœ˜][×ÛÝ™\ˆH›^Y\—ÚZYÚŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚ\›Ûš[™×ÜÜXÚ[™È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”Ý\Ü\›Ûš[™È[™HÜXÚ[™ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý\ÜŠNÂˆY‹OÛÛ\H
+•H\Ý[˜ÙH™]ÙY[ˆH[™\ÈÙˆ\›Ûš[™ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒJJNÂ‚ˆYˆH\ËO˜Y
+˜XÝ]˜]WØÚ[X™\—Ý[\ØÛÛ›Û‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+XÝ]˜]H[\\˜]\™HÛÛ›ÛŠNÂˆY‹OÛÛ\H
+‘[˜X›H\ÈÜ[Ûˆ›Üˆ]]ÛX]YÚ[X™\ˆ[\\˜]\™HÛÛ›Ûˆ‚ˆ•\ÈÜ[ÛˆXÝ]˜]\ÈH[Z][™ÈÙˆ[ˆLNLHÛÛ[X[™™Y›Ü™HH›XXÚ[™WÜÝ\ÙØÛÙW—ˆÚXÚÙ]ÈHÚ[X™\ˆ[\\˜]\™H[™ØZ]È[[]\È™XXÚYˆ‚ˆ’[ˆY][Û‹][Z]È[ˆLMHÛÛ[X[™]H[™ÙˆHš[È\›ˆÙ™ˆHÚ[X™\ˆX]\‹Yˆ™\Ù[——ˆ‚ˆ•\ÈÜ[Ûˆ™[Y\ÈÛˆHš\›]Ø\™HÝ\Ü[™ÈHLNLH[™LMHÛÛ[X[™ÈZ]\ˆšXHXXÜ›ÜÈÜˆ˜]]™[H[™\È\ÝX[H\ÙYÚ[ˆ[ˆXÝ]™HÚ[X™\ˆX]\ˆ\È[œÝ[YˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÞÙ˜[Ù_JNÂ‚ˆYˆH\ËO˜Y
+˜Ú[X™\—Ý[\\˜]\™H‹ÛÒ[ÊNÂˆY‹O›X™[H
+Ú[X™\ˆ[\\˜]\™HŠNÂˆY‹OÛÛ\H
+‘›ÜˆYÚ][\\˜]\™HX]\šX[ÈZÙHP”ËTÐKË[™KHYÚ\ˆÚ[X™\ˆ[\\˜]\™HØ[ˆ[‚ˆœÝ\™\ÜÈÜˆ™YXÙHØ\œ[™È[™Ý[X[HXYÈYÚ\ˆ[\›^Y\ˆ›Û™[™ÈÝ™[™Ýˆ‚ˆ’ÝÙ]™\‹]HØ[YH[YKHYÚ\ˆÚ[X™\ˆ[\\˜]\™HÚ[™YXÙHHY™šXÚY[˜ÞHÙˆZ\ˆ‚ˆ™š[˜][Ûˆ›ÜˆP”È[™TÐK——ˆ‚ˆ‘›ÜˆKUËKK[™Ý\ˆÝË][\\˜]\™HX]\šX[Ë\ÈÜ[ÛˆÚÝ[™H\ØX›Y‚ˆŠÙ]È
+H\ÈHÚ[X™\ˆ[\\˜]\™HÚÝ[™HÝÈÈ]›ÚY^Y\ˆÛÙÙÚ[™ÈØ]\ÙYžH‚ˆ›X]\šX[ÛÙ[š[™È]HX]œ™XZË——ˆ‚ˆ’Yˆ[˜X›Y\È\˜[Y]\ˆ[ÛÈÙ]ÈHËXÛÙH˜\šXX›H˜[YYÚ[X™\—Ý[\\˜]\™KÚXÚØ[ˆ™H‚ˆ\ÙYÈ\ÜÈH\Ú\™YÚ[X™\ˆ[\\˜]\™HÈ[Ý\ˆš[Ý\XXÜ›ËÜˆHX]ÛØZÈXXÜ›È‚ˆ›ZÙH\Îˆ’S•ÔÕT•
+Ý\ˆ˜\šXX›\ÊHÒSP‘T—ÕSTVØÚ[X™\—Ý[\\˜]\™WKˆ‚ˆ•\ÈX^H™H\ÙY[Yˆ[Ý\ˆš[\ˆÙ\È›ÝÝ\ÜLMKÓLNLHÛÛ[X[™ËÜˆYˆ[ÝH\Ú\™H‚ˆÈ[™HX]ÛØZÚ[™È[ˆHš[Ý\XXÜ›ÈYˆ›ÈXÝ]™HÚ[X™\ˆX]\ˆ\È[œÝ[Yˆ‚ˆ
+NÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+Ú[X™\ˆ[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÝ[\\˜]\™H‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Ý\ˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+“›Þž›H[\\˜]\™H›Üˆ^Y\œÈY\ˆH[š]X[Û™KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O™[ÛX™[H
+“›Þž›H[\\˜]\™HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈŒJNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÝ[\\˜]\™WÜ˜[™ÙWÛÝÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+“Z[ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈNLJNÂ‚ˆYˆH\ËO˜Y
+››Þž›WÝ[\\˜]\™WÜ˜[™ÙWÚYÚ‹ÛÒ[ÊNÂˆY‹O›X™[H
+“X^ŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÈÈJNÂ‚ˆYˆH\ËO˜Y
+šXYÝÜ˜\Ù]XÝÞ›Û™H‹ÛÔÚ[ÊNÂˆY‹O›X™[H’XYÜ˜\]XÝ›Û™HŽÈËÙÈ›Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[ÞßJNÂ‚ˆYˆH\ËO˜Y
+™]XÝÝ[—ÝØ[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘]XÝ[ˆØ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+‘]XÝ[ˆØ[ÚXÚØ[‰ÝÛÛZ[ˆÛÈ[™HÚYˆ[™\ÙHÚ[™ÛH[™HÈš[ˆ‚ˆ“X^X™Hš[Y›Ý™\žHÙ[™XØ]\ÙH]	ÜÈ›ÝÛÜÙYÛÜˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+˜Ú[™ÙWÙš[[Y[ÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+Ú[™ÙHš[[Y[ËXÛÙHŠNÂˆY‹OÛÛ\H
+•\ÈËXÛÙH\È[œÙ\YÚ[ˆš[[Y[\ÈÚ[™ÙY[˜ÛY[™ÈÛÛ[X[™ÈÈšYÙÙ\ˆÛÛÚ[™ÙKˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+˜Ú[™ÙWÙ^\Ú[Û—Ü›ÛWÙØÛÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+Ú[™ÙH^\Ú[Ûˆ›ÛHËXÛÙHŠNÂˆY‹OÛÛ\H
+•\ÈËXÛÙH\È[œÙ\YÚ[ˆH^\Ú[Ûˆ›ÛH\ÈÚ[™ÙYˆŠNÂˆY‹O›][[[™HHYNÂˆY‹O™[ÝÚYHYNÂˆY‹OšZYÚHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWÛ[™WÝÚY‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“[™HÚY›ÜˆÜÝ\™˜XÙ\ËˆYˆ^™\ÜÙY\ÈH	K]Ú[™HÛÛ\]YÝ™\ˆH›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹Oœ˜][×ÛÝ™\ˆH››Þž›WÙX[Y]\ˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+‹˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙHŠNÂˆY‹O˜Ø]YÛÜžHH
+”ÜYYŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆÜÝ\™˜XÙH[™š[ÚXÚ\ÈÛÛYˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+ÜÜÚ[Û^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+•ÜÚ[^Y\œÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OœÚY]^H
+›^Y\œÈŠNÈËÈÔÐHYÚYH^ˆY‹OÛÛ\H
+•\È\ÈH[X™\ˆÙˆÛÛY^Y\œÈÙˆÜÚ[[˜ÛY[™ÈHÜ‚ˆœÝ\™˜XÙH^Y\‹ˆÚ[ˆHXÚÛ™\ÜÈØ[Ý[]YžH\È˜[YH\È[›™\ˆ‚ˆ[ˆÜÚ[XÚÛ™\ÜËHÜÚ[^Y\œÈÚ[™H[˜Ü™X\ÙYˆŠNÂˆY‹O™[ÛX™[H
+•ÜÛÛY^Y\œÈŠNÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+ÜÜÚ[ÝXÚÛ™\ÜÈ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÜÚ[XÚÛ™\ÜÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•H[X™\ˆÙˆÜÛÛY^Y\œÈ\È[˜Ü™X\ÙYÚ[ˆÛXÚ[™ÈYˆHXÚÛ™\ÜÈØ[Ý[]YžHÜÚ[^Y\œÈ\È‚ˆ[›™\ˆ[ˆ\È˜[YKˆ\ÈØ[ˆ]›ÚY]š[™ÈÛÈ[ˆÚ[Ú[ˆ^Y\ˆZYÚ\ÈÛX[ˆYX[œÈ]‚ˆ\ÈÙ][™È\È\ØX›Y[™XÚÛ™\ÜÈÙˆÜÚ[\ÈXœÛÛ][H]\›Z[™YžHÜÚ[^Y\œËˆŠNÂˆY‹O™[ÛX™[H
+•ÜÚ[XÚÛ™\ÜÈŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+ÜÜÝ\™˜XÙWÙ[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+•ÜÝ\™˜XÙH[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+‘[œÚ]HÙˆÜÝ\™˜XÙH^Y\‹ˆH˜[YHÙˆL	HÜ™X]\ÈH[HÛÛYÛ[ÛÝÜ^Y\‹ˆ‚ˆ”™YXÚ[™È\È˜[YH™\Ý[È[ˆH^\™YÜÝ\™˜XÙKXØÛÜ™[™ÈÈHÚÜÙ[ˆÜÝ\™˜XÙH]\›‹ˆ‚ˆH˜[YHÙˆ	HÚ[™\Ý[[ˆÛ›HHØ[ÈÛˆHÜ^Y\ˆ™Z[™ÈÜ™X]Yˆ‚ˆ’[[™Y›ÜˆY\Ý]XÈÜˆ[˜Ý[Û˜[\œÜÙ\Ë›ÝÈš^\ÜÝY\ÈÝXÚ\ÈÝ™\‹Y^\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H
+‰HŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+˜›ÝÛWÜÝ\™˜XÙWÙ[œÚ]H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+›ÝÛHÝ\™˜XÙH[œÚ]HŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+‘[œÚ]HÙˆH›ÝÛHÝ\™˜XÙH^Y\‹ˆ‚ˆ’[[™Y›ÜˆY\Ý]XÈÜˆ[˜Ý[Û˜[\œÜÙ\Ë›ÝÈš^\ÜÝY\ÈÝXÚ\ÈÝ™\‹Y^\Ú[Û‹—ˆ‚ˆ•ÐT“’S‘ÎˆÝÙ\š[™È\È˜[YHX^H™YØ]]™[HY™™XÝ™YY\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H
+‰HŠNÂˆY‹O›Z[ˆHLÂˆY‹O›X^HLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚‚ˆYˆH\ËO˜Y
+˜]™[ÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•˜]™[ŠNÂˆY‹OÛÛ\H
+”ÜYYÙˆ˜]™[ÚXÚ\È˜\Ý\ˆ[™Ú]Ý]^\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+˜]™[ÜÜYYÞˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+–ˆ˜]™[ŠNÂˆËÙY‹OÛÛ\H
+”ÜYYÙˆ™\XØ[˜]™[[Û™Èˆ^\Ëˆ‚ˆËÈ•\È\È\XØ[HÝÙ\ˆ™XØ]\ÙHZ[]HÜˆØ[žH\È\™È™H[Ý™Yˆ‚ˆËÈ–™\›ÈYX[œÈ\Ú[™È˜]™[ÜYY\™XÝH[ˆËXÛÙK]Ú[™H[Z]YžHš[\‰ÜÈXš[]HÚ[ˆ[ˆËXÛÙKˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\H‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+•Ú\HÚ[H™]˜XÝ[™ÈŠNÂˆY‹OÛÛ\H
+“[Ý™H›Þž›H[Û™ÈH\Ý^\Ú[Ûˆ]Ú[ˆ™]˜XÝ[™ÈÈÛX[ˆ[žHXZÙYX]\šX[ÛˆH›Þž›Kˆ‚ˆ•\ÈØ[ˆZ[š[Z^™H›ØœÈÚ[ˆš[[™ÈH™]È\Y\ˆ˜]™[[™ËˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÈÈ˜[ÙHJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÙ\Ý[˜ÙH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•Ú\H\Ý[˜ÙHŠNÂˆY‹OÛÛ\H
+‘\ØÜšX™HÝÈÛ™ÈH›Þž›HÚ[[Ý™H[Û™ÈH\Ý]Ú[ˆ™]˜XÝ[™Ë——ˆ‚ˆ‘\[™[™ÈÛˆÝÈÛ™ÈHÚ\HÜ\˜][Ûˆ\ÝËÝÈ˜\Ý[™Û™ÈH^Y\‹Ùš[[Y[™]˜XÝ[ÛˆÙ][™ÜÈ\™K‚ˆ˜H™]˜XÝ[Ûˆ[Ý™HX^H™H™YYYÈ™]˜XÝH™[XZ[š[™Èš[[Y[——ˆ‚ˆ”Ù][™ÈH˜[YH[ˆH™]˜XÝ[[Ý[™Y›Ü™HÚ\HÙ][™È™[ÝÈÚ[\™›Ü›H[žH^Ù\ÜÈ™]˜XÝ[Ûˆ™Y›Ü™HHÚ\K[ÙH]Ú[™H\™›Ü›YYY\‹ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈKˆJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÜš[YWÝÝÙ\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[˜X›HŠNÂˆY‹OÛÛ\H
+•HÚ\[™ÈÝÙ\ˆØ[ˆ™H\ÙYÈÛX[ˆ\H™\ÚYYHÛˆH›Þž›H[™ÝXš[^™HHÚ[X™\ˆ™\ÜÝ\™H[œÚYHH›Þž›K‚ˆš[ˆÜ™\ˆÈ]›ÚY\X\˜[˜ÙHY™XÝÈÚ[ˆš[[™ÈØš™XÝËˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÝ›Û[Y\×Ý™XÝÜˆ‹ÛÑ›Ø]ÊNÂˆËÈ”Îˆ™[[Ý™HÓ
+
+BˆY‹O›X™[H
+”\™Ú[™È›Û[Y\ÈHØYÝ[›ØY›Û[Y\ÈŠNÂˆËÙY‹OÛÛ\H
+•\È™XÝÜˆØ]™\È™\]Z\™Y›Û[Y\ÈÈÚ[™ÙHœ›ÛKÝÈXXÚÛÛ\ÙYÛˆH‚ˆËÈÚ\HÝÙ\‹ˆ\ÙH˜[Y\È\™H\ÙYÈÚ[\YžHÜ™X][ÛˆÙˆH[\™Ú[™È‚ˆËÈ›Û[Y\È™[ÝËˆŠNÂ‚ˆËÈ”ÎˆÚ[™ÙHÌ™ˆOˆM™‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈM™‹M™‹M™‹M™‹M™‹M™‹M™‹M™ˆJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÝ›Û[Y\×ÛX]š^‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”\™Ú[™È›Û[Y\ÈŠNÂˆËÙY‹OÛÛ\H
+•\ÈX]š^\ØÜšX™\È›Û[Y\È
+[ˆÝXšXÈZ[[Y]™\ÊH™\]Z\™YÈ\™ÙHH‚ˆËÈˆ™]Èš[[Y[ÛˆHÚ\HÝÙ\ˆ›Üˆ[žHÚ]™[ˆZ\ˆÙˆÛÛËˆŠNÂˆËÈ”ÎˆÚ[™ÙHM™ˆOˆŽ™‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈ™‹Ž™‹Ž™‹Ž™‹ˆŽ™‹™‹Ž™‹Ž™‹ˆŽ™‹Ž™‹™‹Ž™‹ˆŽ™‹Ž™‹Ž™‹™ˆJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÛ][\Y\ˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘›\Ú][\Y\ˆŠNÂˆY‹OÛÛ\H
+•HXÝX[›\Ú[™È›Û[Y\È\È\]X[ÈH›\Ú][\Y\ˆ][\YYžHH›\Ú[™È›Û[Y\È[ˆHX›KˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒÊJNÂ‚ˆËÈ”ÂˆYˆH\ËO˜Y
+œš[YWÝ›Û[YH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”š[YH›Û[YHŠNÂˆY‹OÛÛ\H
+•H›Û[YHÙˆX]\šX[Èš[YH^Y\ˆÛˆÝÙ\‹ˆŠNÂˆY‹OœÚY]^HN›[p¬ÈŽÂKËÈÝXšXÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHKŒÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Þ‹ÛÑ›Ø]ÊNÂˆËÙY‹O›X™[H
+”ÜÚ][ÛˆŠNÂˆËÙY‹OÛÛ\H
+–ÛÛÜ™[˜]HÙˆHYœ›ÛÛÜ›™\ˆÙˆHÚ\HÝÙ\‹ˆŠNÂˆËÙY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛQ]™[ÜÂˆËÈ”ÎˆÚ[™ÙH]H\HÈ›Ø]ÈÈY\]HÙÚXÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÞÈMKˆJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ÞH‹ÛÑ›Ø]ÊNÂˆËÙY‹O›X™[H
+”ÜÚ][ÛˆHŠNÂˆËÙY‹OÛÛ\H
+–HÛÛÜ™[˜]HÙˆHYœ›ÛÛÜ›™\ˆÙˆHÚ\HÝÙ\‹ˆŠNÂˆËÙY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛQ]™[ÜÂˆËÈ”ÎˆÚ[™ÙH]H\HÈ›Ø]ÈÈY\]HÙÚXÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÞÈŒŒˆJNÂ‚ˆYˆH\ËO˜Y
+œš[YWÝÝÙ\—ÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•ÚYŠNÂˆY‹OÛÛ\H
+•ÚYÙˆHš[YHÝÙ\‹ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆH‹ŒÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ü›Ý][Û—Ø[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ú\HÝÙ\ˆ›Ý][Ûˆ[™ÛHŠNÂˆY‹OÛÛ\H
+•Ú\HÝÙ\ˆ›Ý][Ûˆ[™ÛHÚ]™\ÜXÝÈ^\ËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+œš[YWÝÝÙ\—Øœš[WÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+œš[HÚYŠNÂˆY‹OÛÛ\H
+•ÚYÙˆHœš[KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ËŠJNÂ‚ˆYˆH\ËO˜Y
+œš[YWÝÝÙ\—Øœš[WØÚ[Y™\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+œš[HÚ[Y™\ˆŠNÂˆY‹OÛÛ\H
+‘[˜X›HÜ˜YX[^Y\‹XžK[^Y\ˆ™YXÝ[ÛˆÙˆHœš[H\›Ý[™Hš[YHÝÙ\‹ˆ‚ˆ•\ÈÜ™X]\ÈHÚ[Y™\™YÝ\\™YY™™XÝ™YXÚ[™ÈX]\šX[\ØYÙHÚ[H‚ˆ›XZ[Z[š[™Èš\œÝ^Y\ˆY\Ú[Û‹ˆŠNÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œš[YWÝÝÙ\—Øœš[WØÚ[Y™\—ÛX^ÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^Ú[Y™\ˆÚYŠNÂˆY‹OÛÛ\H
+“X^[][HÚYÙˆHÚ[Y™\ˆ›Û™HYX\Ý\™Yœ›ÛHHÝÙ\ˆ\š[Y]\‹ˆ‚ˆ•Hœš[HÚ[™YXÙHÚ][ˆ\È\Ý[˜ÙKˆ\™Ù\ˆ˜[Y\ÈÜ™X]HH[Ü™H‚ˆ™Ü˜YX[\\ˆ]ZÙH[Ü™H^Y\œÈÈÛÛ\]KˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹O›Z[ˆHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ØÛÛ™WØ[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ÝXš[^˜][ÛˆÛÛ™H\^[™ÛHŠNÂˆY‹OÛÛ\H
+[™ÛH]H\^ÙˆHÛÛ™H]\È\ÙYÈÝXš[^™HHÚ\HÝÙ\‹ˆ‚ˆ“\™Ù\ˆ[™ÛHYX[œÈÚY\ˆ˜\ÙKˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHŽÂˆY‹O›X^HLŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ÌŒ
+JNÂˆˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ÛX^Ü\™ÙWÜÜYY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^[][HÚ\HÝÙ\ˆš[ÜYYÙˆÝ]Ø[ŠNÂˆY‹OÛÛ\H
+“X^[][HÚ\HÝÙ\ˆš[ÜYYÙˆÝ]Ø[ˆŠNÂˆY‹OœÚY]^H›[KÜÈŽÂKËÈZ[[Y]\œÈ\ˆÙXÛÛ™Û‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ÝØ[Ý\H‹ÛÑ[[JNÂˆY‹O›X™[H
+•Ø[\HŠNÂˆY‹OÛÛ\H
+•Ú\HÝÙ\ˆÝ]\ˆØ[\K—ˆ‚ˆŒKˆ™XÝ[™ÛNˆHY˜][Ø[\KH™XÝ[™ÛHÚ]š^YÚY[™ZYÚ—ˆ‚ˆŒ‹ˆÛÛ™NˆHÛÛ™HÚ]Hš[]]H›ÝÛHÈ[ÝXš[^™HHÚ\HÝÙ\‹—ˆ‚ˆŒËˆšXŽˆYÈ›Ý\ˆšXœÈÈHÝÙ\ˆØ[›Üˆ[š[˜ÙYÝXš[]KˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÚ\UÝÙ\•Ø[\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊœ™XÝ[™ÛHŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊ˜ÛÛ™HŠNÂˆY‹O™[[WÝ˜[Y\Ë™[\XÙWØ˜XÚÊœšXˆŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ”™XÝ[™ÛHŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊÛÛ™HŠNÂˆY‹O™[[WÛX™[Ë™[\XÙWØ˜XÚÊ”šXˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÚ\UÝÙ\•Ø[\OŠÝÔ™XÝ[™ÛJJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ù^˜WÜšX—Û[™Ý‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+‘^˜HšXˆ[™ÝŠNÂˆY‹OÛÛ\H
+”ÜÚ]]™H˜[Y\ÈØ[ˆ[˜Ü™X\ÙHHÚ^™HÙˆHšXˆØ[Ú[H™YØ]]™H˜[Y\ÈØ[ˆ™YXÙHHÚ^™Kˆ‚ˆ’ÝÙ]™\‹HÚ^™HÙˆHšXˆØ[Ø[ˆ›Ý™HÛX[\ˆ[ˆ]]\›Z[™YžHHÛX[š[™È›Û[YKˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›X^HÌÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ÜšX—ÝÚY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”šXˆÚYŠNÂˆY‹OÛÛ\H
+”šXˆÚYˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ùš[]ÝØ[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘š[]Ø[ŠNÂˆY‹OÛÛ\H
+•HØ[Ùˆš[YHÝÙ\ˆÚ[š[]ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ùš[[Y[‹ÛÒ[
+NÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽšWÙ[[WÛÜ[ŽÂˆY‹O›X™[H
+•Ú\HÝÙ\ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+‘^Y\œÈŠNÂˆY‹OÛÛ\H
+•H^Y\ˆÈ\ÙHÚ[ˆš[[™È\š[Y]\ˆÙˆHÚ\HÝÙ\‹ˆ‚ˆ”Ù]ÈÈ\ÙHHÛ™H]\È]˜Z[X›H
+›Û‹\ÛÛX›HÛÝ[™H™Y™\œ™Y
+KˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ÝØ[ÙØ\‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•Ø[Ø\ŠNÂˆY‹OÛÛ\H
+Ü™X]HÛX[Ø\È[ˆHÚ\HÝÙ\ˆÝ]\ˆØ[]ÛÛÚ[™ÙH[žHÚ[Ëˆ‚ˆ•Hš\œÝ^\Ú[Ûˆ]Y\ˆHš[[Y[Ú[™ÙHÚ[[\ˆ›ÝYÚHØ\‚ˆ›X]š[™ÈHš[[Y[›ØˆÛˆHØ\YÙH[œÝXYÙˆÛˆHÝ]\ˆØ[Ý\™˜XÙKˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+Ú\[™×Ý›Û[Y\×Ù^Y\œÈ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”\™Ú[™È›Û[Y\ÈHØYÝ[›ØY›Û[Y\ÈŠNÂˆY‹OÛÛ\H
+•\È™XÝÜˆØ]™\È™\]Z\™Y›Û[Y\ÈÈÚ[™ÙHœ›ÛKÝÈXXÚÛÛ\ÙYÛˆH‚ˆÚ\HÝÙ\‹ˆ\ÙH˜[Y\È\™H\ÙYÈÚ[\YžHÜ™X][ÛˆÙˆH[\™Ú[™È‚ˆ›Û[Y\È™[ÝËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÈÈÌ‹Ì‹Ì‹Ì‹Ì‹Ì‹Ì‹Ì‹Ì‹ÌˆJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÚ[×Ú[™š[‹ÛÐ›ÛÛ
+NÂˆY‹O˜Ø]YÛÜžHH
+‘›\ÚÜ[ÛœÈŠNÂˆY‹O›X™[H
+‘›\Ú[ÈØš™XÝÉÈ[™š[ŠNÂˆY‹OÛÛ\H
+”\™Ú[™ÈY\ˆš[[Y[Ú[™ÙHÚ[™HÛ™H[œÚYHØš™XÝÉÈ[™š[Ëˆ‚ˆ•\ÈX^HÝÙ\ˆH[[Ý[ÙˆØ\ÝH[™XÜ™X\ÙHHš[[YKˆ‚ˆ’YˆHØ[È\™Hš[YÚ]˜[œÜ\™[š[[Y[HZ^YÛÛÜˆ[™š[Ú[™HÙY[ˆÝ]ÚYKˆ‚ˆ’]Ú[›ÝZÙHY™™XÝ[›\ÜÈHš[YHÝÙ\ˆ\È[˜X›YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÚ[×ÜÝ\Ü‹ÛÐ›ÛÛ
+NÂˆY‹O˜Ø]YÛÜžHH
+‘›\ÚÜ[ÛœÈŠNÂˆY‹O›X™[H
+‘›\Ú[ÈØš™XÝÉÈÝ\ÜŠNÂˆY‹OÛÛ\H
+”\™Ú[™ÈY\ˆš[[Y[Ú[™ÙHÚ[™HÛ™H[œÚYHØš™XÝÉÈÝ\Üˆ‚ˆ•\ÈX^HÝÙ\ˆH[[Ý[ÙˆØ\ÝH[™XÜ™X\ÙHHš[[YKˆ‚ˆ’]Ú[›ÝZÙHY™™XÝ[›\ÜÈHš[YHÝÙ\ˆ\È[˜X›YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+™›\ÚÚ[×ÛØš™XÝÈ‹ÛÐ›ÛÛ
+NÂˆY‹O˜Ø]YÛÜžHH
+‘›\ÚÜ[ÛœÈŠNÂˆY‹O›X™[H
+‘›\Ú[È\ÈØš™XÝŠNÂˆY‹OÛÛ\H
+•\ÈØš™XÝÚ[™H\ÙYÈ\™ÙHH›Þž›HY\ˆHš[[Y[Ú[™ÙHÈØ]™Hš[[Y[[™XÜ™X\ÙHHš[[YKˆ‚ˆÛÛÜœÈÙˆHØš™XÝÈÚ[™HZ^Y\ÈH™\Ý[ˆ‚ˆ’]Ú[›ÝZÙHY™™XÝ[›\ÜÈHš[YHÝÙ\ˆ\È[˜X›YˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—ØœšYÚ[™È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^[X[œšYÚ[™È\Ý[˜ÙHŠNÂˆY‹OÛÛ\H
+“X^[X[\Ý[˜ÙH™]ÙY[ˆÝ\ÜÈÛˆÜ\œÙH[™š[ÙXÝ[ÛœËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ù^˜WÜÜXÚ[™È‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+•Ú\HÝÙ\ˆ\™ÙH[™\ÈÜXÚ[™ÈŠNÂˆY‹OÛÛ\H
+”ÜXÚ[™ÈÙˆ\™ÙH[™\ÈÛˆHÚ\HÝÙ\‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHLŽÂˆY‹O›X^HÌŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+LŠJNÂ‚ˆYˆH\ËO˜Y
+Ú\WÝÝÙ\—Ù^˜WÙ›ÝÈ‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+‘^˜H›ÝÈ›Üˆ\™Ú[™ÈŠNÂˆY‹OÛÛ\H
+‘^˜H›ÝÈ\ÙY›ÜˆH\™Ú[™È[™\ÈÛˆHÚ\HÝÙ\‹ˆ\ÈXZÙ\ÈH\™Ú[™È[™\ÈXÚÙ\ˆÜˆ˜\œ›ÝÙ\ˆ‚ˆ[ˆ^H›Ü›X[HÛÝ[™KˆHÜXÚ[™È\ÈY\ÝY]]ÛX]XØ[KˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHLŽÂˆY‹O›X^HÌŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+LŠJNÂ‚ˆYˆH\ËO˜Y
+›ØØ[Þ—ÝÚ\WÝÝÙ\—Ü\™ÙWÛ[™\È‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“ØØ[VˆZ[šHÚ\H[™\ÈŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆ\™ÙH[™\È™\Ù\™Y›ÜˆXXÚ[[YHØØ[VˆÚ\HÝÙ\ˆÛÛÚ[™ÙKˆ‚ˆ’YÚ\ˆ˜[Y\È[\›Ý™HÛX[\][˜Ü™X\ÙHÝÙ\ˆ\ˆ‚ˆ“Û›H\ÙYÚ[ˆØØ[Vˆ]\š[™È[™Hš[YHÝÙ\ˆ\™H[˜X›YˆŠNÂˆY‹OœÚY]^H
+›[™\ÈŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHKŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ËŒ
+JNÂ‚ˆYˆH\ËO˜Y
+šYWÝ[\\˜]\™H‹ÛÒ[ÊNÂˆY‹O›X™[H
+’YH[\\˜]\™HŠNÂˆY‹OÛÛ\H
+“›Þž›H[\\˜]\™HÚ[ˆHÛÛ\ÈÝ\œ™[H›Ý\ÙY[ˆ][K]ÛÛÙ]\Ëˆ‚ˆ•\È\ÈÛ›H\ÙYÚ[ˆ	ÓÛÞ™H™]™[[Û‰È\ÈXÝ]™H[ˆš[Ù][™ÜËˆÙ]ÈÈ\ØX›KˆŠNÂˆY‹OœÚY]^HN—LŒLÈˆÊˆ0¬È
+‹ÎÂKËÈYÜ™Y\ÈÙ[Ú]\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HX^Ý[\ÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[ÞÌJNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[ÝÝÙ\—Ú\›Ûš[™×Ø\™XH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•ÝÙ\ˆ\›Ûš[™È\™XHŠNÂˆY‹OÛÛ\H
+’\›Ûš[™È\™XH›Üˆš[YHÝÙ\ˆ[\™˜XÙH^Y\ˆ
+Ú\™HY™™\™[X]\šX[ÈYY]
+KˆŠNÂˆY‹OœÚY]^H
+›[p¬ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛQ]™[ÜÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÞÍŸJNÂ‚ˆYˆH\ËO˜Y
+žWÚÛWØÛÛ\[œØ][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+–VHÛHÛÛ\[œØ][ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+’Û\È[ˆØš™XÝÈÚ[^[™ÜˆÛÛ˜XÝ[ˆHH[™HžHHÛÛ™šYÝ\™Y˜[YKˆ‚ˆ”ÜÚ]]™H˜[Y\ÈXZÙHÛ\ÈšYÙÙ\‹™YØ]]™H˜[Y\ÈXZÙHÛ\ÈÛX[\‹ˆ‚ˆ•\È[˜Ý[Ûˆ\È\ÙYÈY\ÝÚ^™\ÈÛYÚHÚ[ˆHØš™XÝÈ]™H\ÜÙ[X›[™È\ÜÝY\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+žWØÛÛÝ\—ØÛÛ\[œØ][Ûˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+–VHÛÛÝ\ˆÛÛ\[œØ][ÛˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+ÛÛÝ\œÈÙˆØš™XÝÈÚ[^[™ÜˆÛÛ˜XÝ[ˆHH[™HžHHÛÛ™šYÝ\™Y˜[YKˆ‚ˆ”ÜÚ]]™H˜[Y\ÈXZÙHÛÛÝ\œÈšYÙÙ\‹™YØ]]™H˜[Y\ÈXZÙHÛÛÝ\œÈÛX[\‹ˆ‚ˆ•\È[˜Ý[Ûˆ\È\ÙYÈY\ÝÚ^™\ÈÛYÚHÚ[ˆHØš™XÝÈ]™H\ÜÙ[X›[™È\ÜÝY\ËˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+šÛWÝ×ÜÛZÛH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+ÛÛ™\Û\ÈÈÛZÛ\ÈŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”ÙX\˜Ú›Üˆ[[ÜÝXÚ\˜Ý[\ˆÛ\È]Ü[ˆ[Ü™H[ˆÛ™H^Y\ˆ[™ÛÛ™\HÙ[ÛY]žHÈÛZÛ\Ëˆ‚ˆˆ\ÙHH›Þž›HÚ^™H[™H
+šYÙÙ\Ý
+HX[Y]\ˆÈÛÛ\]HHÛZÛKˆ‚ˆ—”ÙYH‹ËÚY˜\˜\Ü‹˜›ÙÜÜÝ˜ÛÛKÌŒLKÌ‹ÜÛZÛ\Ëš[ŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+šÛWÝ×ÜÛZÛWÝ™\ÚÛ‹ÛÑ›Ø]Ü”\˜Ù[
+NÂˆY‹O›X™[H
+”ÛZÛH]XÝ[ÛˆX\™Ú[ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆËÈÙ]^››ËXËY›Ü›X]›ËX›ÛÜÝY›Ü›X]ˆY‹OÛÛ\H
+“X^[][HY™XÝ[ÛˆÙˆHÚ[ÈH\Ý[X]Y˜Y]\ÈÙˆHÚ\˜ÛKˆ‚ˆ—\ÈÞ[[™\œÈ\™HÙ[ˆ^ÜY\ÈšX[™Û\ÈÙˆ˜\žZ[™ÈÚ^™KÚ[ÈX^H›Ý™HÛˆHÚ\˜ÛHÚ\˜Ý[Y™\™[˜ÙKˆ‚ˆˆ\ÈÙ][™È[ÝÜÈ[ÝHÛÛYHY]Ø^HÈœ›ØY[ˆH]XÝ[Û‹ˆ‚ˆ—’[ˆ[HÜˆ[ˆ	HÙˆH˜Y]\ËˆŠNÂˆY‹OœÚY]^H
+›[HÜˆ	HŠNÂˆY‹O›X^Û]\˜[HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ü”\˜Ù[
+ŒK˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+šÛWÝ×ÜÛZÛWÝÚ\ÝY‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”ÛZÛHÚ\ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”›Ý]HHÛZÛH]™\žH^Y\‹ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+[X›˜Z[È‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘ËXÛÙH[X›˜Z[ÈŠNÂˆY‹OÛÛ\H
+”XÝ\™HÚ^™\ÈÈ™HÝÜ™Y[ÈH™ØÛÙH[™œÛHÈœÛ\Èš[\Ë[ˆH›ÛÝÚ[™È›Ü›X]ˆ–KK‹‹—ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ›Û™WÜÝš[™ÎÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÊÔ‘ËÌÌÔ‘ÈŠJNÂ‚ˆYˆH\ËO˜Y
+[X›˜Z[×Ù›Ü›X]‹ÛÑ[[JNÂˆY‹O›X™[H
+‘›Ü›X]ÙˆËXÛÙH[X›˜Z[ÈŠNÂˆY‹OÛÛ\H
+‘›Ü›X]ÙˆËXÛÙH[X›˜Z[Îˆ‘È›Üˆ™\Ý]X[]K”È›ÜˆÛX[\ÝÚ^™KSÒH›ÜˆÝÈY[[ÜžHš\›]Ø\™KˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÐÛÙU[X›˜Z[Ñ›Ü›X]ŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”‘ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ’”ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ”SÒHŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ•Õ•ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊÓÓPÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”‘ÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ’”ÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ”SÒHŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ•ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊÛÛXÈŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÐÛÙU[X›˜Z[Ñ›Ü›X]ŠÐÛÙU[X›˜Z[Ñ›Ü›X]Ž”‘ÊJNÂ‚ˆYˆH\ËO˜Y
+\ÙWÜ™[]]™WÙWÙ\Ý[˜Ù\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•\ÙH™[]]™HH\Ý[˜Ù\ÈŠNÂˆY‹OÛÛ\H
+”™[]]™H^\Ú[Ûˆ\È™XÛÛ[Y[™YÚ[ˆ\Ú[™È›X™[ÛØš™XÝ×ˆÜ[Û‹ˆ‚ˆ”ÛÛYH^Y\œÈÛÜšÈ™]\ˆÚ]\ÈÜ[Ûˆ[˜ÚXÚÙY
+XœÛÛ]H^\Ú[Ûˆ[ÙJKˆ‚ˆ•Ú\HÝÙ\ˆ\ÈÛ›HÛÛ\]X›HÚ]™[]]™H[ÙKˆ]\È™XÛÛ[Y[™YÛˆ‚ˆ›[ÜÝš[\œËˆY˜][\ÈÚXÚÙYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+Ø[ÙÙ[™\˜]Üˆ‹ÛÑ[[JNÂˆY‹O›X™[H
+•Ø[Ù[™\˜]ÜˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+Û\ÜÚXÈØ[Ù[™\˜]Üˆ›ÙXÙ\ÈØ[ÈÚ]ÛÛœÝ[^\Ú[ÛˆÚY[™›Üˆ‚ˆ™\žH[ˆ\™X\È\È\ÙYØ\Yš[ˆ‚ˆ\˜XÚ™H[™Ú[™H›ÙXÙ\ÈØ[ÈÚ]˜\šXX›H^\Ú[ÛˆÚYˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O\š[Y]\‘Ù[™\˜]Ü•\OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Û\ÜÚXÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜\˜XÚ™HŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+Û\ÜÚXÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+\˜XÚ™HŠJNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O\š[Y]\‘Ù[™\˜]Ü•\OŠ\š[Y]\‘Ù[™\˜]Ü•\NŽ\˜XÚ™JJNÂ‚ˆYˆH\ËO˜Y
+Ø[Ý˜[œÚ][Û—Û[™Ý‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+•Ø[˜[œÚ][Ûˆ[™ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•Ú[ˆ˜[œÚ][Ûš[™È™]ÙY[ˆY™™\™[[X™\œÈÙˆØ[È\ÈH\™XÛÛY\È‚ˆ[›™\‹HÙ\Z[ˆ[[Ý[ÙˆÜXÙH\È[ÝYÈÜ]Üˆ›Ú[ˆHØ[ÙYÛY[Ëˆ‚ˆ’]	ÜÈ^™\ÜÙY\ÈH\˜Ù[YÙHÝ™\ˆ›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+Ø[Ý˜[œÚ][Û—Ùš[\—Ù]šX][Ûˆ‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+•Ø[˜[œÚ][Ûš[™Èš[\ˆX\™Ú[ˆŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+”™]™[˜[œÚ][Ûš[™È˜XÚÈ[™›Ü™]ÙY[ˆÛ™H^˜HØ[[™Û™H\ÜËˆ\È‚ˆ›X\™Ú[ˆ^[™ÈH˜[™ÙHÙˆ^\Ú[ÛˆÚYÈÚXÚ›ÛÝÈÈÓZ[š[][HØ[ÚY‚ˆ‹HX\™Ú[‹ˆ
+ˆZ[š[][HØ[ÚY
+ÈX\™Ú[—Kˆ[˜Ü™X\Ú[™È\ÈX\™Ú[ˆ‚ˆœ™YXÙ\ÈH[X™\ˆÙˆ˜[œÚ][ÛœËÚXÚ™YXÙ\ÈH[X™\ˆÙˆ^\Ú[Ûˆ‚ˆœÝ\ËÜÝÜÈ[™˜]™[[YKˆÝÙ]™\‹\™ÙH^\Ú[ÛˆÚY˜\šX][ÛˆØ[ˆXYÈ‚ˆ[™\‹HÜˆÝ™\™^\Ú[Ûˆ›Ø›[\Ëˆ‚ˆ’]	ÜÈ^™\ÜÙY\ÈH\˜Ù[YÙHÝ™\ˆ›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+Ø[Ý˜[œÚ][Û—Ø[™ÛH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ø[˜[œÚ][Ûš[™È™\ÚÛ[™ÛHŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•Ú[ˆÈÜ™X]H˜[œÚ][ÛœÈ™]ÙY[ˆ]™[ˆ[™Ù[X™\œÈÙˆØ[ËˆHÙYÙHÚ\HÚ]‚ˆˆ[ˆ[™ÛHÜ™X]\ˆ[ˆ\ÈÙ][™ÈÚ[›Ý]™H˜[œÚ][ÛœÈ[™›ÈØ[ÈÚ[™H‚ˆœš[Y[ˆHÙ[\ˆÈš[H™[XZ[š[™ÈÜXÙKˆ™YXÚ[™È\ÈÙ][™È™YXÙ\È‚ˆH[X™\ˆ[™[™ÝÙˆ\ÙHÙ[\ˆØ[Ë]X^HX]™HØ\ÈÜˆÝ™\™^YKˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHKŽÂˆY‹O›X^HNKŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŠJNÂ‚ˆYˆH\ËO˜Y
+Ø[Ù\ÝšX][Û—ØÛÝ[‹ÛÒ[
+NÂˆY‹O›X™[H
+•Ø[\ÝšX][ÛˆÛÝ[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•H[X™\ˆÙˆØ[ËÛÝ[Yœ›ÛHHÙ[\‹Ý™\ˆÚXÚH˜\šX][Ûˆ™YYÈÈ™H‚ˆœÜ™XYˆÝÙ\ˆ˜[Y\ÈYX[ˆ]HÝ]\ˆØ[ÈÛ‰ÝÚ[™ÙH[ˆÚYˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+›Z[—Ù™X]\™WÜÚ^™H‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+“Z[š[][H™X]\™HÚ^™HŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+“Z[š[][HXÚÛ™\ÜÈÙˆ[ˆ™X]\™\Ëˆ[Ù[™X]\™\È]\™H[›™\ˆ[ˆ\È˜[YHÚ[›Ý™Hš[Y‚ˆÚ[H™X]\™\ÈXÚÙ\ˆ[ˆ[ˆ\È˜[YHÚ[™HÚY[™YÈHZ[š[][HØ[ÚYˆ‚ˆ’]	ÜÈ^™\ÜÙY\ÈH\˜Ù[YÙHÝ™\ˆ›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+›Z[—Û[™ÝÙ˜XÝÜˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“Z[š[][HØ[[™ÝŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+Y\Ý\È˜[YHÈ™]™[ÚÜ[˜ÛÜÙYØ[Èœ›ÛH™Z[™Èš[YÚXÚÛÝ[[˜Ü™X\ÙHš[[YKˆ‚ˆ’YÚ\ˆ˜[Y\È™[[Ý™H[Ü™H[™Û™Ù\ˆØ[Ë——ˆ‚ˆ““ÕNˆ›ÝÛH[™ÜÝ\™˜XÙ\ÈÚ[›Ý™HY™™XÝYžH\È˜[YHÈ™]™[š\ÝX[Ø\ÈÛˆHÝ]ÚYHÙˆH[Ù[ˆ‚ˆY\Ý	ÓÛ™HØ[™\ÚÛ	È[ˆHY˜[˜ÙYÙ][™ÜÈ™[ÝÈÈY\ÝHÙ[œÚ]]š]HÙˆÚ]\ÈÛÛœÚY\™YHÜ\Ý\™˜XÙKˆ‚ˆ‰ÓÛ™HØ[™\ÚÛ	È\ÈÛ›Hš\ÚX›HYˆ\ÈÙ][™È\ÈÙ]X›Ý™HHY˜][˜[YHÙˆKÜˆYˆÚ[™ÛK]Ø[ÜÝ\™˜XÙ\È\È[˜X›YˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHŒÂˆY‹O›X^HKŒÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—ÛZ[—Ø™XYÝÚY‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+‘š\œÝ^Y\ˆZ[š[][HØ[ÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•HZ[š[][HØ[ÚY]ÚÝ[™H\ÙY›ÜˆHš\œÝ^Y\ˆ\È™XÛÛ[Y[™YÈ™HÙ]‚ˆÈHØ[YHÚ^™H\ÈH›Þž›Kˆ\ÈY\ÝY[\È^XÝYÈ[š[˜ÙHY\Ú[Û‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆYˆH\ËO˜Y
+›Z[—Ø™XYÝÚY‹ÛÔ\˜Ù[
+NÂˆY‹O›X™[H
+“Z[š[][HØ[ÚYŠNÂˆY‹O˜Ø]YÛÜžHH
+”]X[]HŠNÂˆY‹OÛÛ\H
+•ÚYÙˆHØ[]Ú[™\XÙH[ˆ™X]\™\È
+XØÛÜ™[™ÈÈHZ[š[][H™X]\™HÚ^™JH‚ˆ›ÙˆH[Ù[ˆYˆHZ[š[][HØ[ÚY\È[›™\ˆ[ˆHXÚÛ™\ÜÈÙˆH™X]\™K‚ˆˆHØ[Ú[™XÛÛYH\ÈXÚÈ\ÈH™X]\™H]Ù[‹ˆ‚ˆ’]	ÜÈ^™\ÜÙY\ÈH\˜Ù[YÙHÝ™\ˆ›Þž›HX[Y]\‹ˆŠNÂˆY‹OœÚY]^H‰HŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+JJNÂ‚ˆËÈXÛ\™H™]˜XÝ˜[Y\È›Üˆš[[Y[›Ùš[KÝ™\œšY[™ÈHš[\‰ÜÈ^Y\ˆ›Ùš[K‚ˆ›Üˆ
+ÛÛœÝÚ\ˆ
+›ÜÚÙ^HˆÂˆËÈ›Ø]Âˆœ™]˜XÝ[Û—Û[™Ý‹ž—ÚÜ‹ž—ÚÜÝ\\È‹œ™]˜XÝÛYØX›Ý™H‹œ™]˜XÝÛYØ™[ÝÈ‹œ™]˜XÝÛYÙ[™›Ü˜ÙH‹œ™]˜XÝ[Û—ÜÜYY‹™\™]˜XÝ[Û—ÜÜYY‹œ™]˜XÝÜ™\Ý\Ù^˜H‹œ™]˜XÝ[Û—ÛZ[š[][WÝ˜]™[‹ˆËÈ”Îˆ›Ø]ÂˆÚ\WÙ\Ý[˜ÙH‹ˆËÈ›ÛÛÂˆœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹Ú\H‹ˆËÈ\˜Ù[Âˆœ™]˜XÝØ™Y›Ü™WÝÚ\H‹ˆ›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]‹ˆœ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]‹ˆœ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹ˆœ™]˜XÝÜ™\Ý\Ù^˜WÝÛÛÚ[™ÙH‚ˆJHÂˆ]]È]ÛÜHÜ[ÛœË™š[™
+ÜÚÙ^JNÂˆ\ÜÙ\
+]ÛÜOHÜ[ÛœË™[™
+
+JNÂˆYˆH\ËO˜YÛ[X›JÝŽœÝš[™Ê™š[[Y[ÈŠH
+ÈÜÚÙ^K]ÛÜOœÙXÛÛ™\JNÂˆY‹O›X™[BOH]ÛÜOœÙXÛÛ™›X™[ÂˆY‹O™[ÛX™[H]ÛÜOœÙXÛÛ™™[ÛX™[ÂˆY‹OÛÛ\OH]ÛÜOœÙXÛÛ™ÛÛ\ÂˆY‹OœÚY]^H]ÛÜOœÙXÛÛ™œÚY]^ÂˆY‹O™[[WÚÙ^\×ÛX\H]ÛÜOœÙXÛÛ™™[[WÚÙ^\×ÛX\ÂˆY‹O™[[WÛX™[ÈH]ÛÜOœÙXÛÛ™™[[WÛX™[ÎÂˆY‹O™[[WÝ˜[Y\ÈH]ÛÜOœÙXÛÛ™™[[WÝ˜[Y\ÎÂˆY‹O›Z[ˆH]ÛÜOœÙXÛÛ™›Z[ŽÂˆY‹O›X^H]ÛÜOœÙXÛÛ™›X^ÂˆËÐ”ÎˆÚÝÛˆÜXÚYšXÈš[[Y[™]˜XÝÛÛ™šYÈ™XØ]\ÙHÙHYHHXXÚ[™H™]˜XÝ[ÈÛÛQ]™[Ü[ÙBˆYˆ
+
+Ý˜Û\
+ÜÚÙ^Kœ™]˜XÝ[Û—Û[™ÝŠHOH
+Hˆ
+Ý˜Û\
+ÜÚÙ^Kž—ÚÜŠHOH
+_ˆ
+Ý˜Û\
+ÜÚÙ^K›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]ŠHOH
+_ˆ
+Ý˜Û\
+ÜÚÙ^Kœ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]ŠHOH
+JBˆY‹O›[ÙHHÛÛTÚ[\NÂˆ[ÙBˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆÝÚ]Ú
+Y‹O\JHÂˆØ\ÙHÛÑ›Ø]ÈˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]Ó[X›H
+Ý]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û‘›Ø]ÊˆŠ]ÛÜOœÙXÛÛ™™Y˜][Ý˜[YK™Ù]
+
+JKO˜[Y\ÊJNÈœ™XZÎÂˆØ\ÙHÛÔ\˜Ù[ÈˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[Ó[X›JÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û”\˜Ù[ÊŠ]ÛÜOœÙXÛÛ™™Y˜][Ý˜[YK™Ù]
+
+JKO˜[Y\ÊJNÈœ™XZÎÂˆØ\ÙHÛÐ›ÛÛÈˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛÓ[X›H
+Ý]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û›ÛÛÊˆŠ]ÛÜOœÙXÛÛ™™Y˜][Ý˜[YK™Ù]
+
+JKO˜[Y\ÊJNÈœ™XZÎÂˆØ\ÙHÛÑ[[\ÈˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[\ÑÙ[™\šXÓ[X›JÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û‘[[\ÑÙ[™\šXÊˆŠ]ÛÜOœÙXÛÛ™™Y˜][Ý˜[YK™Ù]
+
+JKO˜[Y\ÊJNÈœ™XZÎÂˆY˜][ˆ\ÜÙ\
+˜[ÙJNÂˆBˆB‚ˆYˆH\ËO˜Y
+™]XÝÛ˜\œ›Ý×Ú[\›˜[ÜÛÛYÚ[™š[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘]XÝ˜\œ›ÝÈ[\›˜[ÛÛY[™š[ŠNÂˆY‹O˜Ø]YÛÜžHH
+”Ý™[™ÝŠNÂˆY‹OÛÛ\H
+•\ÈÜ[ÛˆÚ[]]ËY]XÝ˜\œ›ÝÈ[\›˜[ÛÛY[™š[\™X\Ëˆ‚ˆ’Yˆ[˜X›YHÛÛ˜Ù[šXÈ]\›ˆÚ[™H\ÙY›ÜˆH\™XHÈÜYY\š[[™Ëˆ‚ˆ“Ý\Ú\ÙKH™XÝ[[™X\ˆ]\›ˆÚ[™H\ÙYžHY˜][ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[š]Ù^Y\—ÛÜ[Û—ÚÙ^\Ê
+BžÂˆËÈÛÛ™šYÓÜ[Û‘›Ø]ËÛÛ™šYÓÜ[Û”\˜Ù[ËÛÛ™šYÓÜ[Û›ÛÛËÛÛ™šYÓÜ[Û”Ýš[™ÜÂˆWÙ^Y\—ÛÜ[Û—ÚÙ^\ÈHÂˆ››Þž›WÙX[Y]\ˆ‹›Z[—Û^Y\—ÚZYÚ‹›X^Û^Y\—ÚZYÚ‹™^Y\—ÛÙ™œÙ]‹ˆœ™]˜XÝ[Û—Û[™Ý‹ž—ÚÜ‹ž—ÚÜÝ\\È‹ž—ÚÜÝÚ[—Üš[YH‹˜]™[ÜÛÜH‹œ™]˜XÝÛYØX›Ý™H‹œ™]˜XÝÛYØ™[ÝÈ‹œ™]˜XÝÛYÙ[™›Ü˜ÙH‹œ™]˜XÝ[Û—ÜÜYY‹™\™]˜XÝ[Û—ÜÜYY‹ˆœ™]˜XÝØ™Y›Ü™WÝÚ\H‹œ™]˜XÝÜ™\Ý\Ù^˜H‹œ™]˜XÝ[Û—ÛZ[š[][WÝ˜]™[‹Ú\H‹Ú\WÙ\Ý[˜ÙH‹ˆœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹œ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹œ™]˜XÝÜ™\Ý\Ù^˜WÝÛÛÚ[™ÙH‹™^Y\—ØÛÛÝ\ˆ‹ˆ™Y˜][Ùš[[Y[Ü›Ùš[H‹œ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]‹›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]‚ˆNÂ‚ˆWÙ^Y\—Ü™]˜XÝÚÙ^\ÈHÂˆ™\™]˜XÝ[Û—ÜÜYY‹ˆ›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]‹ˆœ™]˜XÝØ™Y›Ü™WÝÚ\H‹ˆœ™]˜XÝÛYØX›Ý™H‹ˆœ™]˜XÝÛYØ™[ÝÈ‹ˆœ™]˜XÝÛYÙ[™›Ü˜ÙH‹ˆœ™]˜XÝÜ™\Ý\Ù^˜H‹ˆœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹ˆœ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]‹ˆœ™]˜XÝ[Û—Û[™Ý‹ˆœ™]˜XÝ[Û—ÛZ[š[][WÝ˜]™[‹ˆœ™]˜XÝ[Û—ÜÜYY‹ˆ˜]™[ÜÛÜH‹ˆÚ\H‹ˆÚ\WÙ\Ý[˜ÙH‹ˆž—ÚÜ‹ˆž—ÚÜÝ\\È‹ˆž—ÚÜÝÚ[—Üš[YH‹ˆœ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹ˆœ™]˜XÝÜ™\Ý\Ù^˜WÝÛÛÚ[™ÙH‚ˆNÂˆ\ÜÙ\
+ÝŽš\×ÜÛÜY
+WÙ^Y\—Ü™]˜XÝÚÙ^\Ë˜™YÚ[Š
+KWÙ^Y\—Ü™]˜XÝÚÙ^\Ë™[™
+
+JJNÂŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[š]Ùš[[Y[ÛÜ[Û—ÚÙ^\Ê
+BžÂˆWÙš[[Y[ÛÜ[Û—ÚÙ^\ÈHÂˆ™š[[Y[ÙX[Y]\ˆ‹›Z[—Û^Y\—ÚZYÚ‹›X^Û^Y\—ÚZYÚ‹ˆœ™]˜XÝ[Û—Û[™Ý‹ž—ÚÜ‹ž—ÚÜÝ\\È‹œ™]˜XÝÛYØX›Ý™H‹œ™]˜XÝÛYØ™[ÝÈ‹œ™]˜XÝÛYÙ[™›Ü˜ÙH‹œ™]˜XÝ[Û—ÜÜYY‹™\™]˜XÝ[Û—ÜÜYY‹ˆœ™]˜XÝØ™Y›Ü™WÝÚ\H‹œ™]˜XÝÜ™\Ý\Ù^˜H‹œ™]˜XÝ[Û—ÛZ[š[][WÝ˜]™[‹Ú\H‹Ú\WÙ\Ý[˜ÙH‹ˆœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹œ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹œ™]˜XÝÜ™\Ý\Ù^˜WÝÛÛÚ[™ÙH‹™š[[Y[ØÛÛÝ\ˆ‹ˆ™š[[Y[Û][WØÛÛÜœÈ‹™š[[Y[ØÛÛÝ\—Û[ÙH‹ˆ™Y˜][Ùš[[Y[Ü›Ùš[H‹œ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]‹›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]‹Ê‹™š[[Y[ÜÙX[WÙØ\Š‹ÂˆNÂ‚ˆWÙš[[Y[Ü™]˜XÝÚÙ^\ÈHÂˆ™\™]˜XÝ[Û—ÜÜYY‹ˆ›Û™×Ü™]˜XÝ[Ûœ×ÝÚ[—ØÝ]‹ˆœ™]˜XÝØ™Y›Ü™WÝÚ\H‹ˆœ™]˜XÝÛYØX›Ý™H‹ˆœ™]˜XÝÛYØ™[ÝÈ‹ˆœ™]˜XÝÛYÙ[™›Ü˜ÙH‹ˆœ™]˜XÝÜ™\Ý\Ù^˜H‹ˆœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹ˆœ™]˜XÝ[Û—Ù\Ý[˜Ù\×ÝÚ[—ØÝ]‹ˆœ™]˜XÝ[Û—Û[™Ý‹ˆœ™]˜XÝ[Û—ÛZ[š[][WÝ˜]™[‹ˆœ™]˜XÝ[Û—ÜÜYY‹ˆÚ\H‹ˆÚ\WÙ\Ý[˜ÙH‹ˆž—ÚÜ‹ˆž—ÚÜÝ\\È‹ˆœ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹ˆœ™]˜XÝÜ™\Ý\Ù^˜WÝÛÛÚ[™ÙH‹ˆNÂˆ\ÜÙ\
+ÝŽš\×ÜÛÜY
+WÙš[[Y[Ü™]˜XÝÚÙ^\Ë˜™YÚ[Š
+KWÙš[[Y[Ü™]˜XÝÚÙ^\Ë™[™
+
+JJNÂŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[š]ÜÛWÜ\˜[\Ê
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆËÈÓHš[\ˆÙ][™ÜÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÝÚY‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒŠJNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÚZYÚ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŽŠJNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÜ^[×Þ‹ÛÒ[
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆY‹O›X™[H
+–ŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+MŒ
+JNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÜ^[×ÞH‹ÛÒ[
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆY‹O›X™[H
+–HŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+M
+JNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÛZ\œ›Ü—Þ‹ÛÐ›ÛÛ
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÛZ\œ›Ü—ÞH‹ÛÐ›ÛÛ
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™\Ü^WÛÜšY[][Ûˆ‹ÛÑ[[JNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÓQ\Ü^SÜšY[][ÛŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ›[™ØØ\HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÜ˜Z]ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÓQ\Ü^SÜšY[][ÛŠÛYÔÜ˜Z]
+JNÂ‚ˆYˆH\ËO˜Y
+™˜\ÝÝ[Ý[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+œÛÝ×Ý[Ý[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+˜\™XWÙš[‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŠJNÂ‚ˆYˆH\ËO˜Y
+œ™[]]™WØÛÜœ™XÝ[Ûˆ‹ÛÑ›Ø]ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÊÈK‹KŸH
+JNÂ‚ˆYˆH\ËO˜Y
+œ™[]]™WØÛÜœ™XÝ[Û—Þ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+œ™[]]™WØÛÜœ™XÝ[Û—ÞH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+œ™[]]™WØÛÜœ™XÝ[Û—Þˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+˜XœÛÛ]WØÛÜœ™XÝ[Ûˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+™[Y˜[Ù›ÛÝÛZ[—ÝÚY‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+™Ø[[XWØÛÜœ™XÝ[Ûˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚‚ˆËÈÓHX]\šX[Ù][™ÜË‚‚ˆYˆH\ËO˜Y
+›X]\šX[ØÛÛÝ\ˆ‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ˜ÛÛÜŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÊˆÌŽPŒŒˆŠJNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[Ý\H‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™ÝZWÝ\HHÛÛ™šYÓÜ[Û‘YŽŽ‘ÕRU\NŽ™—Ù[[WÛÜ[ŽÈËÈÑÎˆÏÏÂˆY‹O™ÝZWÙ›YÜÈHœÚÝ×Ý˜[YHŽÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ•ÝYÚŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‘›^X›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊØ\Ý[™ÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ‘[[ŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ’X]\™\Ú\Ý[ŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê•ÝYÚŠJNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Û^Y\—ÚZYÚ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒÊJNÂ‚ˆYˆH\ËO˜Y
+˜›ÝWÝ›Û[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHLÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+˜›ÝWÝÙZYÚ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[Ù[œÚ]H‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+˜›ÝWØÛÜÝ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+™˜YYÛ^Y\œÈ‹ÛÒ[
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÎÂˆY‹O›X^HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+›Z[—Ù^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+›X^Ù^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+™^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+›Z[—Ú[š]X[Ù^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+›X^Ú[š]X[Ù^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ML
+JNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Ù^ÜÝ\™WÝ[YH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+MJJNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[ØÛÜœ™XÝ[Ûˆ‹ÛÑ›Ø]ÊNÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]ÊÈK‹K‹KˆH
+JNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[ØÛÜœ™XÝ[Û—Þ‹ÛÑ›Ø]
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[ØÛÜœ™XÝ[Û—ÞH‹ÛÑ›Ø]
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[ØÛÜœ™XÝ[Û—Þˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O™[ÛX™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[Ý™[™Üˆ‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+™Y˜][ÜÛWÛX]\šX[Ü›Ùš[H‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œÛWÛX]\šX[ÜÙ][™Ü×ÚY‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+™Y˜][ÜÛWÜš[Ü›Ùš[H‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œÛWÜš[ÜÙ][™Ü×ÚY‹ÛÔÝš[™ÊNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂˆY‹O˜ÛHHÛÛ™šYÓÜ[Û‘YŽŽ››ØÛNÂ‚ˆYˆH\ËO˜Y
+œÝ\Ü×Ù[˜X›H‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚXYÙœ›ÛÙX[Y]\ˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚXYÜ[™]˜][Ûˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒŠJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÚXYÝÚY‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HŒÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜ[\—ÙX[Y]\ˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HMNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜÛX[Ü[\—ÙX[Y]\—Ü\˜Ù[‹ÛÔ\˜Ù[
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”\˜Ù[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛX^ØœšYÙ\×ÛÛ—Ü[\ˆ‹ÛÒ[
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+ÊJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜ[\—ØÛÛ›™XÝ[Û—Û[ÙH‹ÛÑ[[JNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÓT[\ÛÛ›™XÝ[Û“[ÙOŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊžšYÞ˜YÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ˜Ü›ÜÜÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[˜[ZXÈŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÓT[\ÛÛ›™XÝ[Û“[ÙOŠÛ\ÛQ[˜[ZXÊJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØZ[]WÛÛ›H‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜ[\—ÝÚY[š[™×Ù˜XÝÜˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ˜\ÙWÙX[Y]\ˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+Œ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ˜\ÙWÚZYÚ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØ˜\ÙWÜØY™]WÙ\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜØÜš]XØ[Ø[™ÛH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛX^ØœšYÙWÛ[™Ý‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+MKŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛX^Ü[\—Û[š×Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÈËÈYX[œÈ›È[šÚ[™ÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÛØš™XÝÙ[]˜][Ûˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HMLÈËÈ\È\ÈHX^ZYÚÙˆš[ÛˆÓBˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜÚ[×Ù[œÚ]WÜ™[]]™H‹ÛÒ[
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+œÝ\ÜÜÚ[×ÛZ[š[X[Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+œYÙ[˜X›H‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+œYÝØ[ÝXÚÛ™\ÜÈ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹Œ
+JNÂ‚ˆYˆH\ËO˜Y
+œYÝØ[ÚZYÚ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŠJNÂ‚ˆYˆH\ËO˜Y
+œYØœš[WÜÚ^™H‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HÌÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+KŠJNÂ‚ˆYˆH\ËO˜Y
+œYÛX^ÛY\™ÙWÙ\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œYÝØ[ÜÛÜH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+LŒ
+JNÂ‚ˆYˆH\ËO˜Y
+œYØ\›Ý[™ÛØš™XÝ‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œYØ\›Ý[™ÛØš™XÝÙ]™\ž]Ú\™H‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œYÛØš™XÝÙØ\‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œYÛØš™XÝØÛÛ›™XÝÜ—ÜÝšYH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+L
+JNÂ‚ˆYˆH\ËO˜Y
+œYÛØš™XÝØÛÛ›™XÝÜ—ÝÚY‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+œYÛØš™XÝØÛÛ›™XÝÜ—Ü[™]˜][Ûˆ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ŒÊJNÂ‚ˆYˆH\ËO˜Y
+šÛÝÚ[™×Ù[˜X›H‹ÛÐ›ÛÛ
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+šÛÝÚ[™×ÛZ[—ÝXÚÛ™\ÜÈ‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆËÙY‹OœÚY]^HˆŽÂˆY‹O›Z[ˆHNÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛTÚ[\NÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+ËŠJNÂ‚ˆYˆH\ËO˜Y
+šÛÝÚ[™×Ü]X[]H‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O›Z[ˆHÂˆY‹O›X^HNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+JJNÂ‚ˆYˆH\ËO˜Y
+šÛÝÚ[™×ØÛÜÚ[™×Ù\Ý[˜ÙH‹ÛÑ›Ø]
+NÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹O˜Ø]YÛÜžHH
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹OœÚY]^H›[HŽÂKËÈZ[[Y]\œËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹O›Z[ˆHÂˆY‹O›X^HLÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+‹Œ
+JNÂ‚ˆYˆH\ËO˜Y
+›X]\šX[Üš[ÜÜYY‹ÛÑ[[JNÂˆËÙY‹O›X™[H
+ˆŠNÂˆËÙY‹OÛÛ\H
+ˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[OÓSX]\šX[ÜYYŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊœÛÝÈŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™˜\ÝŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊˆŠNÂˆY‹O›[ÙHHÛÛPY˜[˜ÙYÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[OÓSX]\šX[ÜYYŠÛ[\Ñ˜\Ý
+JNÂŸB‚›ÚYš[ÛÛ™šYÑYŽŽš[™WÛYØXÞJØÛÛ™šY×ÛÜ[Û—ÚÙ^H	›ÜÚÙ^KÝŽœÝš[™È	˜[YJBžÂˆËÐ”Îˆ[™HYØXÞHÜ[ÛœÂˆYˆ
+ÜÚÙ^HOH™[˜X›WÝÚ\WÝÝÙ\ˆŠHÂˆÜÚÙ^HH™[˜X›WÜš[YWÝÝÙ\ˆŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHÚ\WÝÝÙ\—ÝÚYŠHÂˆÜÚÙ^HHœš[YWÝÝÙ\—ÝÚYŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHÚ\[™×Ý›Û[YHŠHÂˆÜÚÙ^HHœš[YWÝ›Û[YHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHÚ\WÝÝÙ\—Øœš[WÝÚYŠHÂˆÜÚÙ^HHœš[YWÝÝÙ\—Øœš[WÝÚYŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHÛÛØÚ[™ÙWÙØÛÙHŠHÂˆÜÚÙ^HH˜Ú[™ÙWÙš[[Y[ÙØÛÙHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜œšYÙWÙ˜[—ÜÜYYŠHÂˆÜÚÙ^HH›Ý™\š[™×Ù˜[—ÜÜYYŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHš[™š[Ù^Y\ˆŠHÂˆÜÚÙ^HHœÜ\œÙWÚ[™š[Ùš[[Y[ŽÂˆY[ÙHYˆ
+ÜÚÙ^HOHœÛÛYÚ[™š[Ù^Y\ˆŠHÂˆÜÚÙ^HHœÛÛYÚ[™š[Ùš[[Y[ŽÂˆY[ÙHYˆ
+ÜÚÙ^HOHœ\š[Y]\—Ù^Y\ˆŠHÂˆÜÚÙ^HHØ[Ùš[[Y[ŽÂˆY[ÙHYŠÜÚÙ^HOHÚ\WÝÝÙ\—Ù^Y\ˆŠHÂˆÜÚÙ^HHÚ\WÝÝÙ\—Ùš[[Y[ŽÂˆY[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÛX]\šX[Ù^Y\ˆŠHÂˆÜÚÙ^HHœÝ\ÜÙš[[Y[ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÛX]\šX[Ú[\™˜XÙWÙ^Y\ˆŠHÂˆÜÚÙ^HHœÝ\ÜÚ[\™˜XÙWÙš[[Y[ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÛX]\šX[Ø[™ÛHŠHÂˆÜÚÙ^HHœÝ\ÜØ[™ÛHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÛX]\šX[Ù[™›Ü˜ÙWÛ^Y\œÈŠHÂˆÜÚÙ^HH™[™›Ü˜ÙWÜÝ\ÜÛ^Y\œÈŽÂˆH[ÙHYˆ
+
+ÜÚÙ^HOHš[š]X[Û^Y\—Üš[ÚZYÚˆˆÜÚÙ^HOHš[š]X[Û^Y\—ÜÜYYˆˆÜÚÙ^HOHš[\›˜[ÜÛÛYÚ[™š[ÜÜYYˆˆÜÚÙ^HOHÜÜÝ\™˜XÙWÜÜYYˆˆÜÚÙ^HOHœÝ\ÜÚ[\™˜XÙWÜÜYYˆˆÜÚÙ^HOH›Ý]\—ÝØ[ÜÜYYˆˆÜÚÙ^HOHœÝ\ÜÛØš™XÝÞWÙ\Ý[˜ÙHŠH	‰ˆ˜[YK™š[™
+‰HŠHOHÝŽœÝš[™ÎŽ›œÜÊHÂˆËÐ”Îˆ\È\ÈÛ›Ùš[H[ˆÚXÚ˜[YH\È^™\ÜÙY\È\˜Ù[YÙK‚ˆËÐ]›ÝÈ\ÙHÙ^K]˜[YH]\Ý™HXœÛÛ]H˜[YK‚ˆËÔ™\Ù]ÈY˜][˜[YHžH\˜\Ú[™È\ÙHÙ^HÈ]›ÚY\œÚ[™È\œ›Ü‹‚ˆÜÚÙ^HHˆŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHš[š\š]×ØÝ[[][]]™HŠHÂˆÜÚÙ^HHš[š\š]×ÙÜ›Ý\ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜ÛÛ\]X›WÜš[\œ×ØÛÛ™][Û—ØÝ[[][]]™HŠHÂˆÜÚÙ^HH˜ÛÛ\]X›WÛXXÚ[™WÙ^™\ÜÚ[Û—ÙÜ›Ý\ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜ÛÛ\]X›WÜš[×ØÛÛ™][Û—ØÝ[[][]]™HŠHÂˆÜÚÙ^HH˜ÛÛ\]X›WÜ›ØÙ\Ü×Ù^™\ÜÚ[Û—ÙÜ›Ý\ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜ÛÛÛ[™ÈŠHÂˆÜÚÙ^HHœÛÝ×ÙÝÛ—Ù›Ü—Û^Y\—ØÛÛÛ[™ÈŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH[Y[\ÙWÛ›×ÝÛÛXYŠHÂˆÜÚÙ^HH[Y[\ÙWÝ\HŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH[Y[\ÙWÝ\Hˆ	‰ˆ˜[YHOHŒˆŠHÂˆËÈÛš[HŒˆ\È›Û™KŒˆˆ\È˜Y][Û˜[ˆËÈ™]Èš[HŒˆ\È˜Y][Û˜[\˜\ÙHŒˆ‚ˆ˜[YHHŒŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÝ\Hˆ	‰ˆ˜[YHOH››Ü›X[ŠHÂˆ˜[YHH››Ü›X[
+X[X[
+HŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÝ\Hˆ	‰ˆ˜[YHOH™YHŠHÂˆ˜[YHH™YJX[X[
+HŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜÝ\Hˆ	‰ˆ˜[YHOHšXœšY
+]]ÊHŠHÂˆ˜[YHH™YJ]]ÊHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÝ\ÜØ˜\ÙWÜ]\›ˆˆ	‰ˆ˜[YHOH››Û™HŠHÂˆ˜[YHHšÛÝÈŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH™Y™™\™[ÜÙ][™Ü×Ý×ÜÞ\Ý[HŠHÂˆÝŽœÝš[™ÈÛÜWÝ˜[YHH˜[YNÂˆÛÜWÝ˜[YK™\˜\ÙJÝŽœ™[[Ý™JÛÜWÝ˜[YK˜™YÚ[Š
+KÛÜWÝ˜[YK™[™
+
+K	×‰ÊKÛÜWÝ˜[YK™[™
+
+JNÈËÈ™[[Ý™H	È‰È[ˆÝš[™ÂˆÝŽœÙ]ÝŽœÝš[™ÏˆÜ]ÚÙ^\ÈHÜ]Ýš[™Ð[™™[[Ý™Q\XØ]Q[[Y[
+ÛÜWÝ˜[YKŽÈŠNÂˆ›Üˆ
+ÝŽœÝš[™ÈÜ]ÚÙ^HˆÜ]ÚÙ^\ÊHÂˆÝŽœÝš[™ÈÛÜWÚÙ^HHÜ]ÚÙ^KÛÜWÝ˜[YHHˆŽÂˆ[™WÛYØXÞJÛÜWÚÙ^KÛÜWÝ˜[YJNÂˆYˆ
+ÛÜWÚÙ^HOHÜ]ÚÙ^JHÂˆ™\XÙTÝš[™Ê˜[YKÜ]ÚÙ^KÛÜWÚÙ^JNÂˆBˆBˆH[ÙHYˆ
+ÜÚÙ^HOH›Ý™\š[™×Ù˜[—Ý™\ÚÛˆ	‰ˆ˜[YHOHIHŠHÂˆ˜[YHHŒL	HŽÂˆY[ÙHYŠÜÚÙ^HOHØ[Ú[™š[ÛÜ™\ˆˆ
+HÂˆYˆ
+˜[YHOHš[›™\ˆØ[ÛÝ]\ˆØ[Ú[™š[ˆ˜[YHOHš[™š[Ú[›™\ˆØ[ÛÝ]\ˆØ[ŠHÂˆÜÚÙ^HHØ[ÜÙ\]Y[˜ÙHŽÂˆ˜[YHHš[›™\ˆØ[ÛÝ]\ˆØ[ŽÂˆH[ÙHYˆ
+˜[YHOH›Ý]\ˆØ[Ú[›™\ˆØ[Ú[™š[ˆ˜[YHOHš[™š[ÛÝ]\ˆØ[Ú[›™\ˆØ[ŠHÂˆÜÚÙ^HHØ[ÜÙ\]Y[˜ÙHŽÂˆ˜[YHH›Ý]\ˆØ[Ú[›™\ˆØ[ŽÂˆH[ÙHYˆ
+˜[YHOHš[›™\‹[Ý]\‹Z[›™\ˆØ[Ú[™š[ŠHÂˆÜÚÙ^HHØ[ÜÙ\]Y[˜ÙHŽÂˆ˜[YHHš[›™\‹[Ý]\‹Z[›™\ˆØ[ŽÂˆH[ÙHÂˆÜÚÙ^HHØ[ÜÙ\]Y[˜ÙHŽÂˆBˆBˆ[ÙHYŠÜÚÙ^HOH™[œÝ\™WÝ™\XØ[ÜÚ[ÝXÚÛ™\ÜÈŠHÂˆYŠ˜[YHOHŒHŠHÂˆ˜[YHH™[œÝ\™WØ[ŽÂˆBˆ[ÙHYˆ
+˜[YHOHŒŠ^Âˆ˜[YHH™[œÝ\™WÛ[Ù\˜]HŽÂˆBˆH[ÙHYˆ
+ÜÚÙ^HOHœ›Ý]WÜÛÛYÚ[™š[Ù\™XÝ[ÛˆŠHÂˆÜÚÙ^HHœÛÛYÚ[™š[Ü›Ý]WÝ[\]HŽÂˆYˆ
+˜[YHOHŒHŠHÂˆ˜[YHHŒLŽÂˆH[ÙHYˆ
+˜[YHOHŒŠHÂˆ˜[YHHŒŽÂˆBˆH[ÙHYˆ
+ÜÚÙ^HOHœÜ\œÙWÚ[™š[Ø[˜ÚÜˆŠHÂˆÜÚÙ^HHš[™š[Ø[˜ÚÜˆŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHœÜ\œÙWÚ[™š[Ø[˜ÚÜ—ÛX^ŠHÂˆÜÚÙ^HHš[™š[Ø[˜ÚÜ—ÛX^ŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜Ú[X™\—Ý[\\˜]\™\ÈŠHÂˆÜÚÙ^HH˜Ú[X™\—Ý[\\˜]\™HŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH[X›˜Z[ÜÚ^™HŠHÂˆÜÚÙ^HH[X›˜Z[ÈŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHÜÛÛ™WÝØ[Ý\Hˆ	‰ˆ˜[YHOH››Û™HŠHÂˆÜÚÙ^HH›Û›WÛÛ™WÝØ[ÝÜŽÂˆ˜[YHHŒHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHš[š]X[Û^Y\—Ù›Ý×Ü˜][ÈŠHÂˆÜÚÙ^HH˜›ÝÛWÜÛÛYÚ[™š[Ù›Ý×Ü˜][ÈŽÂˆH[ÙHYˆ
+ÜÚÙ^HOHš\›Ûš[™×Ù\™XÝ[ÛˆŠHÂˆÜÚÙ^HHš\›Ûš[™×Ø[™ÛHŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH˜ÛÝ[\˜›ÛWÚÛWØœšYÚ[™ÈŠHÂˆÜÚÙ^HH˜ÛÝ[\˜›Ü™WÚÛWØœšYÚ[™ÈŽÂˆH[ÙHYˆ
+ÜÚÙ^HOH™˜YÜÚY[ˆ	‰ˆ˜[YHOH›[Z]YŠHÂˆ˜[YHH™\ØX›YŽÂˆH[ÙHYˆ
+
+ÜÚÙ^HOHœÜ\œÙWÚ[™š[Ü]\›ˆˆˆÜÚÙ^HOHÜÜÝ\™˜XÙWÜ]\›ˆˆˆÜÚÙ^HOH˜›ÝÛWÜÝ\™˜XÙWÜ]\›ˆˆˆÜÚÙ^HOHš[\›˜[ÜÛÛYÚ[™š[Ü]\›ˆˆˆÜÚÙ^HOHš\›Ûš[™×Ü]\›ˆˆˆÜÚÙ^HOHœÝ\ÜÚ\›Ûš[™×Ü]\›ˆŠH	‰ˆ˜[YHOHžšYË^˜YÈŠHÂˆ˜[YHHœ™XÝ[[™X\ˆŽÂˆB‚ˆËÈYÛ›Ü™HH›ÛÝÚ[™ÈØœÛÛ]HÛÛ™šYÝ\˜][ÛˆÙ^\Î‚ˆÝ]XÈÝŽœÙ]ÝŽœÝš[™ÏˆYÛ›Ü™HHÂˆ˜XØÙ[\˜][Ûˆ‹œØØ[H‹œ›Ý]H‹™\XØ]H‹™\XØ]WÙÜšY‹ˆ˜™YÜÚ^™H‹ˆœš[ØÙ[\ˆ‹™Ì‹Ú\WÝÝÙ\—Ü\—ØÛÛÜ—ÝÚ\H‹ˆœÝ\ÜÜÚ\œÝZ[È‹œÝ\ÜÜ™[[Ý™WÜÛX[ÛÝ™\š[™ÜÈ‹œÝ\ÜÝÚ]ÜÚX]‹ˆ™YWÜÝ\ÜØÛÛ\Ú[Û—Ü™\ÛÛ][Ûˆ‹™YWÜÝ\ÜÝÚ]Ú[™š[‹ˆ›X^Ý›Û[Y]šX×ÜÜYY‹›X^Üš[ÜÜYY‹ˆœÝ\ÜØÛÜÚ[™×Ü˜Y]\È‹ˆœ™[[Ý™WÙœ™\WÜÝÙY\‹œ™[[Ý™WØ™YÛ]™[[™È‹œ™[[Ý™WÙ^\Ú[Û—ØØ[Xœ˜][Ûˆ‹ˆœÝ\ÜÝ˜[œÚ][Û—Û[™WÝÚY‹œÝ\ÜÝ˜[œÚ][Û—ÜÜYY‹˜™YÝ[\\˜]\™H‹˜™YÝ[\\˜]\™WÚ[š]X[Û^Y\ˆ‹ˆ˜Ø[—ÜÝÚ]ÚÛ›Þž›WÝ\H‹˜Ø[—ØYØ]^[X\žWÙ˜[ˆ‹™^˜WÙ›\ÚÝ›Û[YH‹œÜYÚ]WÙ]XÝÜˆ‹˜Y\]™WÛ^Y\—ÚZYÚ‹ˆž—ÚÜÝ\H‹ž—ÛYÝ\H‹˜™YÝ[\\˜]\™WÙY™™\™[˜ÙH‹›Û™×Ü™]˜XÝ[Û—ÝÚ[—ØÝ]‹ˆœ™]˜XÝ[Û—Ù\Ý[˜ÙWÝÚ[—ØÝ]‹ˆ™^Y\—Ý\H‹ˆš[\›˜[ØœšYÙWÜÝ\ÜÝXÚÛ™\ÜÈ‹™^Y\—ØÛX\˜[˜ÙWÛX^Ü˜Y]\È‹ÜØ\™XWÝ™\ÚÛ‹œ™YXÙWÝØ[ÜÛÛYÚ[™š[‹™š[[Y[ÛØYÝ[YH‹™š[[Y[Ý[›ØYÝ[YH‹ˆœÛ[ÛÝØÛÙY™šXÚY[‹›Ý™\š[™×ÝÝ[WÜÜYY‹œÚ[[Û[ÙH‹ˆNÂ‚ˆYˆ
+YÛ›Ü™K™š[™
+ÜÚÙ^JHOHYÛ›Ü™K™[™
+
+JHÂˆÜÚÙ^HHˆŽÂˆ™]\›ŽÂˆB‚ˆYˆ
+Hš[ØÛÛ™šY×ÙY‹š\ÊÜÚÙ^JJHÂˆÜÚÙ^HHˆŽÂˆ™]\›ŽÂˆBŸB‚‹ËÈØ[YY\ˆHÛÛ™šYÈ\ÈØYY\ÈHÚÛK‚‹ËÈ\™›Ü›HÛÛ\ÜÚ]HÛÛ™\œÚ[ÛœË›Üˆ^[\HY\™Ú[™È][\HÙ^\È[ÈÛ™HÙ^K‚‹ËÈÛ‰ÝÛÛ™\Ú[™ÛHÜ[ÛœÈ\™K[\[Y[ÝXÚÛÛ™\œÚ[Ûˆ[ˆš[ÛÛ™šYÑYŽŽš[™WÛYØXÞJ
+H[œÝXY‚›ÚYš[ÛÛ™šYÑYŽŽš[™WÛYØXÞWØÛÛ\ÜÚ]J[˜[ZXÔš[ÛÛ™šYÈ	˜ÛÛ™šYÊBžÂˆYˆ
+ÛÛ™šYËš\Ê[X›˜Z[ÈŠJHÂˆÝŽœÝš[™È^[[ÛŽÂˆYˆ
+ÛÛ™šYËš\Ê[X›˜Z[×Ù›Ü›X]ŠJHÂˆYˆ
+ÛÛœÝÛÛ™šYÓÜ[Û‘YŠˆÜHÛÛ™šYË™YŠ
+KO™Ù]
+[X›˜Z[×Ù›Ü›X]ŠJHÂˆ^[[ÛˆHÜO™[[WÝ˜[Y\Ë˜]
+ÛÛ™šYË›Ü[ÛŠ[X›˜Z[×Ù›Ü›X]ŠKO™Ù][
+
+JNÂˆBˆB‚ˆÝŽœÝš[™È[X›˜Z[×ÜÝˆHÛÛ™šYË›ÜÜÝš[™Ê[X›˜Z[ÈŠNÂˆ]]ÈÝ[X›˜Z[×Û\Ý\œ›Üœ×HHÐÛÙU[X›˜Z[ÎŽ›XZÙWØ[™ØÚXÚ×Ý[X›˜Z[Û\Ý
+[X›˜Z[×ÜÝ‹^[[ÛŠNÂ‚ˆYˆ
+\œ›ÜœÈOH[[WØš]X\ÚÏ[X›˜Z[\œ›ÜŠ
+JHÂˆÝŽœÝš[™È\œ›Ü—ÜÝˆH—ˆˆ
+ÈÛXÌÜŽŽ™›Ü›X]
+’[˜[Y˜[YH›ÝšYY›Üˆ\˜[Y]\ˆ	LINˆ	L‰H‹[X›˜Z[È‹[X›˜Z[×ÜÝŠNÂˆ\œ›Ü—ÜÝˆ
+ÏHÐÛÙU[X›˜Z[ÎŽ™Ù]Ù\œ›Ü—ÜÝš[™Ê\œ›ÜœÊNÂˆ›ÝÈ˜YÜ[Û•˜[YQ^Ù\[ÛŠ\œ›Ü—ÜÝŠNÂˆB‚ˆYˆ
+][X›˜Z[×Û\Ý™[\J
+JHÂˆÛÛœÝ]]Éˆ^[[ÛœÈHÛÛ™šYÓÜ[Û‘[[OÐÛÙU[X›˜Z[Ñ›Ü›X]ŽŽ™Ù]Ù[[WÛ˜[Y\Ê
+NÂˆ[X›˜Z[×ÜÝ‹˜ÛX\Š
+NÂˆ›Üˆ
+ÛÛœÝ]]ÉˆÙ^Ú^™WHˆ[X›˜Z[×Û\Ý
+Bˆ[X›˜Z[×ÜÝˆ
+ÏHÛXÌÜŽŽ™›Ü›X]
+‰LI^	L‰KÉLÉK‹Ú^™Kž
+
+KÚ^™KžJ
+K^[[ÛœÖÚ[
+^
+WJNÂˆ[X›˜Z[×ÜÝ‹œ™\Ú^™J[X›˜Z[×ÜÝ‹›[™Ý
+
+HHŠNÂ‚ˆÛÛ™šYËœÙ]ÚÙ^WÝ˜[YJ[X›˜Z[È‹™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê[X›˜Z[×ÜÝŠJNÂˆBˆB‚ˆYˆ
+ÛÛ™šYËš\ÊÚ\[™×Ý›Û[Y\×ÛX]š^ŠH	‰ˆXÛÛ™šYËš\ÊÚ\[™×Ý›Û[Y\×Ý\ÙWØÝ\ÝÛWÛX]š^ŠJHÂˆËÈ\È\È\\™[HÛÛYH™KL‹ËŒÈÛÛ™šYËÚ\™HHÚ\[™×Ý›Û[Y\×ÛX]š^Ø\È[Ø^\È\ÙY‚ˆËÈH‹ËŒÈ[›ÙXÙY[ˆÜ[ÛˆÈ\ÙHY˜][È\š]™Yœ›ÛHÛÛ™šYËˆ[ˆØ\ÙHHX]š^ˆËÈÛÛZ[œÈÛ›HY˜][˜[Y\ËÝÚ]Ú]ÈY˜][™Z]š[Ý\‹ˆHY˜][˜[Y\ÂˆËÈÙ\™H™\›ÜÈÛˆHXYÛÛ˜[[™MÝ\Ú\ÙK‚ˆÝŽ™XÝÜÝX›OˆX]š^HÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ÏŠÚ\[™×Ý›Û[Y\×ÛX]š^ŠKO˜[Y\ÎÂˆ[[WÛÙ—Ù^Y\œÈH[
+ÝŽœÜ\
+X]š^œÚ^™J
+JH
+ÈJNÂˆ[HHLNÂˆ›ÛÛÝ\ÝÛHH˜[ÙNÂˆ›Üˆ
+[ˆHÈˆ[
+X]š^œÚ^™J
+JNÈ
+ÊÚŠHÂˆYˆ
+ˆ	H[WÛÙ—Ù^Y\œÈOH
+Bˆ
+ÊÚNÂˆYˆ
+HOHˆ	H[WÛÙ—Ù^Y\œÈ	‰ˆZ\×Ø\›Þ
+X]š^Ú—KMŠJHÂˆÝ\ÝÛHHYNÂˆœ™XZÎÂˆBˆBˆÛÛ™šYËœÙ]ÚÙ^WÝ˜[YJÚ\[™×Ý›Û[Y\×Ý\ÙWØÝ\ÝÛWÛX]š^‹™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+Ý\ÝÛJJNÂˆBŸB‚˜ÛÛœÝš[ÛÛ™šYÑYˆš[ØÛÛ™šY×ÙYŽÂ‚‘[˜[ZXÔš[ÛÛ™šYÈ[˜[ZXÔš[ÛÛ™šYÎŽ™[Üš[ØÛÛ™šYÊ
+BžÂ‚\™]\›ˆ[˜[ZXÔš[ÛÛ™šYÊ
+ÛÛœÝš[™YÚ[ÛÛÛ™šYÉŠQ[š[ÛÛ™šYÎŽ™Y˜][Ê
+JNÂŸB‚‘[˜[ZXÔš[ÛÛ™šYÎŽ‘[˜[ZXÔš[ÛÛ™šYÊÛÛœÝÝ]XÔš[ÛÛ™šYÉˆšÊHˆ[˜[ZXÐÛÛ™šYÊšËšËšÙ^\×Ü™YŠ
+JBžÂŸB‚‘[˜[ZXÔš[ÛÛ™šYÊˆ[˜[ZXÔš[ÛÛ™šYÎŽ›™]×Ùœ›ÛWÙY˜][×ÚÙ^\ÊÛÛœÝÝŽ™XÝÜÝŽœÝš[™Ïˆ	šÙ^\ÊBžÂˆ]]È
+›Ý]H™]È[˜[ZXÔš[ÛÛ™šYÊ
+NÂˆÝ]O˜\WÛÛ›J[š[ÛÛ™šYÎŽ™Y˜][Ê
+KÙ^\ÊNÂˆ™]\›ˆÝ]ÂŸB‚™ÝX›HZ[—ÛØš™XÝÙ\Ý[˜ÙJÛÛœÝÛÛ™šYÐ˜\ÙH	˜Ù™ÊBžÂˆÛÛœÝÛÛ™šYÓÜ[Û‘[[Oš[\•XÚ›ÛÙÞOˆ
+›ÜÜš[\—ÝXÚ›ÛÙÞHHÙ™Ë›Ü[ÛÛÛ™šYÓÜ[Û‘[[Oš[\•XÚ›ÛÙÞOŠœš[\—ÝXÚ›ÛÙÞHŠNÂˆ]]Èš[\—ÝXÚ›ÛÙÞHHÜÜš[\—ÝXÚ›ÛÙÞHÈÜÜš[\—ÝXÚ›ÛÙÞKO˜[YHˆ[šÛ›ÝÛŽÂ‚ˆÝX›H™]HŽÂ‚ˆYˆ
+š[\—ÝXÚ›ÛÙÞHOHÓJBˆ™]H‹ŽÂˆ[ÙHÂˆËÐ”Îˆ\XØ]WÙ\Ý[˜ÙHÙX[HÈ™H\Ù[\ÜÂˆÛÛœÝ^ˆÝX›H\XØ]WÙ\Ý[˜ÙHH‹ŽÂˆ]]ÈXÜ—ÛÜHÙ™Ë›Ü[ÛÛÛ™šYÓÜ[Û‘›Ø]Š™^Y\—ØÛX\˜[˜ÙWÜ˜Y]\ÈŠNÂˆ]]ÈÛ×ÛÜHÙ™Ë›Ü[ÛÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠœš[ÜÙ\]Y[˜ÙHŠNÂ‚ˆYˆ
+YXÜ—ÛÜXÛ×ÛÜ
+Bˆ™]HŽÂˆ[ÙHÂˆËÈZ[ˆØš™XÝ\Ý[˜ÙH\ÈX^
+\XØ]WÙ\Ý[˜ÙKÛX\˜[˜ÙWÜ˜Y]\ÊBˆ™]H
+
+Û×ÛÜO˜[YHOHš[Ù\]Y[˜ÙNŽžSØš™XÝ
+H	‰ˆXÜ—ÛÜO˜[YHˆ\XØ]WÙ\Ý[˜ÙJHÂˆXÜ—ÛÜO˜[YHˆ\XØ]WÙ\Ý[˜ÙNÂˆBˆB‚ˆ™]\›ˆ™]ÂŸB‚›ÚY[˜[ZXÔš[ÛÛ™šYÎŽ››Ü›X[^™WÙ™J[\ÙYÙš[[Y[ÊBžÂˆYˆ
+\ËOš\Ê™^Y\ˆŠJHÂˆ[^Y\ˆH\ËO›Ü[ÛŠ™^Y\ˆŠKO™Ù][
+
+NÂˆ\ËO™\˜\ÙJ™^Y\ˆŠNÂˆYˆ
+^Y\ˆOH
+HÂˆYˆ
+]\ËOš\ÊœÜ\œÙWÚ[™š[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠœÜ\œÙWÚ[™š[Ùš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆYˆ
+]\ËOš\ÊØ[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠØ[Ùš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆËÈÛ‰Ý›ÜYØ]HHÝ\œ™[^Y\ˆÈÝ\Ü‚ˆËÈ›Üˆ›Û‹\ÛÛX›HÝ\ÜËHY˜][Œˆ^Y\ˆYX[œÈÈ\ÙHHXÝ]™H^Y\‹ˆËÈ›ÜˆÛÛX›HÝ\ÜÈÛ™HÙ\Z[›HÙ\È›ÝØ[ÈÙ]H^Y\ˆÈ›Û‹\ÛÛX›K‚ˆËÈYˆ
+]\ËOš\ÊœÝ\ÜÙš[[Y[ŠJBˆËÈ\ËO›Ü[ÛŠœÝ\ÜÙš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆËÈYˆ
+]\ËOš\ÊœÝ\ÜÚ[\™˜XÙWÙš[[Y[ŠJBˆËÈ\ËO›Ü[ÛŠœÝ\ÜÚ[\™˜XÙWÙš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆBˆB‚ˆYˆ
+\ËOš\ÊÚ\WÝÝÙ\—Ùš[[Y[ŠJHÂˆËÈYˆ[˜[Y™\XÙHÚ]‚ˆ[^Y\ˆH\ËO›ÜÛÛ™šYÓÜ[Û’[ŠÚ\WÝÝÙ\—Ùš[[Y[ŠKO˜[YNÂˆ[[WÙ^Y\œÈH\ËO›ÜÛÛ™šYÓÜ[Û‘›Ø]ÏŠ››Þž›WÙX[Y]\ˆŠKOœÚ^™J
+NÂˆYˆ
+^Y\ˆ^Y\ˆˆ[WÙ^Y\œÊBˆ\ËO›Ü[ÛŠÚ\WÝÝÙ\—Ùš[[Y[ŠKOœÙ][
+
+NÂˆB‚ˆYˆ
+]\ËOš\ÊœÛÛYÚ[™š[Ùš[[Y[ŠH	‰ˆ\ËOš\ÊœÜ\œÙWÚ[™š[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠœÛÛYÚ[™š[Ùš[[Y[‹YJKOœÙ][
+\ËO›Ü[ÛŠœÜ\œÙWÚ[™š[Ùš[[Y[ŠKO™Ù][
+
+JNÂ‚ˆYˆ
+\ËOš\ÊœÜ\˜[Û[ÙHŠH	‰ˆ\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛŠœÜ\˜[Û[ÙH‹YJKO˜[YJHÂˆÂˆËÈ\ÈÚÝ[™HXÝX[HÛ™HÛ›HÛˆHÜ\˜[^Y\œÈ[œÝXYÙˆ[ˆ]]ÊˆÜH\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛÏŠœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹YJNÂˆÜO˜[Y\Ë˜\ÜÚYÛŠÜO˜[Y\ËœÚ^™J
+K˜[ÙJNÈËÈÙ][˜[Y\ÈÈ˜[ÙBˆËÈ\ØX›H™]˜XÝÛˆ^Y\ˆÚ[™ÙH[ÛÈ›Üˆš[[Y[Ý™\œšY\Ë‚ˆ]]ÊˆÜÛˆH\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛÓ[X›OŠ™š[[Y[Ü™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹YJNÂˆÜÛ‹O˜[Y\Ë˜\ÜÚYÛŠÜÛ‹O˜[Y\ËœÚ^™J
+K˜[ÙJNÈËÈÙ][˜[Y\ÈÈ˜[ÙK‚ˆBˆÂˆ\ËO›ÜÛÛ™šYÓÜ[Û’[ŠØ[ÛÛÜÈ‹YJKO˜[YHHNÂˆ\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛŠ˜[\›˜]WÙ^˜WÝØ[‹YJKO˜[YHH˜[ÙNÂˆ\ËO›ÜÛÛ™šYÓÜ[Û’[ŠÜÜÚ[Û^Y\œÈ‹YJKO˜[YHHÂˆ\ËO›ÜÛÛ™šYÓÜ[Û”\˜Ù[ŠœÜ\œÙWÚ[™š[Ù[œÚ]H‹YJKO˜[YHHÂˆBˆB‚ˆYˆ
+]]È
+›ÜÙØÛÙWÜ™\ÛÛ][ÛˆH\ËO›ÜÛÛ™šYÓÜ[Û‘›Ø]Šœ™\ÛÛ][Ûˆ‹˜[ÙJNÈÜÙØÛÙWÜ™\ÛÛ][ÛŠBˆËÈ™\ÛÛ][ÛˆÚ[™HX›Ý™H][K‚ˆÜÙØÛÙWÜ™\ÛÛ][Û‹O˜[YHHÝŽ›X^
+ÜÙØÛÙWÜ™\ÛÛ][Û‹O˜[YKŒJNÂ‚ˆËÈ”ÂˆÛÛ™šYÓÜ[Û›ÛÛ
+ˆ\ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠ™[˜X›WÜš[YWÝÝÙ\ˆŠNÂˆYˆ
+\ÙYÙš[[Y[Èˆ	‰ˆ\ÛÜOH[ŠHÂˆÛÛ™šYÓÜ[Û›ÛÛ
+ˆ\ÛÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠš[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚ‹YJNÂˆËÐÛÛ™šYÓÜ[Û›ÛÛ
+ˆ[ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠ˜Y\]™WÛ^Y\—ÚZYÚŠNÂˆÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠˆ×ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠœš[ÜÙ\]Y[˜ÙHŠNÂ‚ˆÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŠˆ[Y[\ÙWÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŠ[Y[\ÙWÝ\HŠNÂˆ›ÛÛ\×ÜÛ[ÛÝÝ[Y[\ÙHH[Y[\ÙWÛÜOH[ˆ	‰ˆ[Y[\ÙWÛÜO˜[YHOH[Y[\ÙU\NŽÛ[ÛÝÂˆYˆ
+Z\×ÜÛ[ÛÝÝ[Y[\ÙH	‰ˆ
+\ÙYÙš[[Y[ÈOHH×ÛÜO˜[YHOHš[Ù\]Y[˜ÙNŽžSØš™XÝ
+JHÂˆ\ÛÜO˜[YHH˜[ÙNÂˆB‚ˆYˆ
+\ÛÜO˜[YJHÂˆYˆ
+\ÛÛÜ
+Bˆ\ÛÛÜO˜[YHH˜[ÙNÂˆËÚYˆ
+[ÛÜ
+BˆËÈ[ÛÜO˜[YHH˜[ÙNÂˆBˆÊˆ”Îˆ]\Ø[™ÒÚ[™ÈH›ÝÝ\™HYˆ\È\ÈÝ[˜[Y\ÝÛÛ[Y[]Ý]Ø]\ÙH’[™\[™[Ý\Ü^Y\ˆZYÚˆ\È™K[Ü[™Y‚ˆ[ÙHÂˆYˆ
+\ÛÛÜ
+Bˆ\ÛÛÜO˜[YHHYNÂˆBˆ
+‹ÂˆBŸB‚‹ËÐ”Î™]šYH›Ü›X[^™WÙ™HÈˆÝ\È[™Ø[[HÛ™HžHÛ™H[ˆš[Ž\B›ÚY[˜[ZXÔš[ÛÛ™šYÎŽ››Ü›X[^™WÙ™WÌJ
+BžÂˆYˆ
+\ËOš\Ê™^Y\ˆŠJHÂˆ[^Y\ˆH\ËO›Ü[ÛŠ™^Y\ˆŠKO™Ù][
+
+NÂˆ\ËO™\˜\ÙJ™^Y\ˆŠNÂˆYˆ
+^Y\ˆOH
+HÂˆYˆ
+]\ËOš\ÊœÜ\œÙWÚ[™š[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠœÜ\œÙWÚ[™š[Ùš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆYˆ
+]\ËOš\ÊØ[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠØ[Ùš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆËÈÛ‰Ý›ÜYØ]HHÝ\œ™[^Y\ˆÈÝ\Ü‚ˆËÈ›Üˆ›Û‹\ÛÛX›HÝ\ÜËHY˜][Œˆ^Y\ˆYX[œÈÈ\ÙHHXÝ]™H^Y\‹ˆËÈ›ÜˆÛÛX›HÝ\ÜÈÛ™HÙ\Z[›HÙ\È›ÝØ[ÈÙ]H^Y\ˆÈ›Û‹\ÛÛX›K‚ˆËÈYˆ
+]\ËOš\ÊœÝ\ÜÙš[[Y[ŠJBˆËÈ\ËO›Ü[ÛŠœÝ\ÜÙš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆËÈYˆ
+]\ËOš\ÊœÝ\ÜÚ[\™˜XÙWÙš[[Y[ŠJBˆËÈ\ËO›Ü[ÛŠœÝ\ÜÚ[\™˜XÙWÙš[[Y[‹YJKOœÙ][
+^Y\ŠNÂˆBˆB‚ˆYˆ
+]\ËOš\ÊœÛÛYÚ[™š[Ùš[[Y[ŠH	‰ˆ\ËOš\ÊœÜ\œÙWÚ[™š[Ùš[[Y[ŠJBˆ\ËO›Ü[ÛŠœÛÛYÚ[™š[Ùš[[Y[‹YJKOœÙ][
+\ËO›Ü[ÛŠœÜ\œÙWÚ[™š[Ùš[[Y[ŠKO™Ù][
+
+JNÂ‚ˆYˆ
+\ËOš\ÊœÜ\˜[Û[ÙHŠH	‰ˆ\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛŠœÜ\˜[Û[ÙH‹YJKO˜[YJHÂˆÂˆËÈ\ÈÚÝ[™HXÝX[HÛ™HÛ›HÛˆHÜ\˜[^Y\œÈ[œÝXYÙˆ[ˆ]]ÊˆÜH\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛÏŠœ™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹YJNÂˆÜO˜[Y\Ë˜\ÜÚYÛŠÜO˜[Y\ËœÚ^™J
+K˜[ÙJNÈËÈÙ][˜[Y\ÈÈ˜[ÙBˆËÈ\ØX›H™]˜XÝÛˆ^Y\ˆÚ[™ÙH[ÛÈ›Üˆš[[Y[Ý™\œšY\Ë‚ˆ]]ÊˆÜÛˆH\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛÓ[X›OŠ™š[[Y[Ü™]˜XÝÝÚ[—ØÚ[™Ú[™×Û^Y\ˆ‹YJNÂˆÜÛ‹O˜[Y\Ë˜\ÜÚYÛŠÜÛ‹O˜[Y\ËœÚ^™J
+K˜[ÙJNÈËÈÙ][˜[Y\ÈÈ˜[ÙK‚ˆBˆÂˆ\ËO›ÜÛÛ™šYÓÜ[Û’[ŠØ[ÛÛÜÈ‹YJKO˜[YHHNÂˆ\ËO›ÜÛÛ™šYÓÜ[Û›ÛÛŠ˜[\›˜]WÙ^˜WÝØ[‹YJKO˜[YHH˜[ÙNÂˆ\ËO›ÜÛÛ™šYÓÜ[Û’[ŠÜÜÚ[Û^Y\œÈ‹YJKO˜[YHHÂˆ\ËO›ÜÛÛ™šYÓÜ[Û”\˜Ù[ŠœÜ\œÙWÚ[™š[Ù[œÚ]H‹YJKO˜[YHHÂˆBˆB‚ˆYˆ
+]]È
+›ÜÙØÛÙWÜ™\ÛÛ][ÛˆH\ËO›ÜÛÛ™šYÓÜ[Û‘›Ø]Šœ™\ÛÛ][Ûˆ‹˜[ÙJNÈÜÙØÛÙWÜ™\ÛÛ][ÛŠBˆËÈ™\ÛÛ][ÛˆÚ[™HX›Ý™H][K‚ˆÜÙØÛÙWÜ™\ÛÛ][Û‹O˜[YHHÝŽ›X^
+ÜÙØÛÙWÜ™\ÛÛ][Û‹O˜[YKŒJNÂ‚ˆ™]\›ŽÂŸB‚ØÛÛ™šY×ÛÜ[Û—ÚÙ^\È[˜[ZXÔš[ÛÛ™šYÎŽ››Ü›X[^™WÙ™WÌŠ[[WÛØš™XÝË[\ÙYÙš[[Y[ÊBžÂˆØÛÛ™šY×ÛÜ[Û—ÚÙ^\ÈÚ[™ÙYÚÙ^\ÎÂˆÛÛ™šYÓÜ[Û›ÛÛ
+ˆ\ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠ™[˜X›WÜš[YWÝÝÙ\ˆŠNÂˆYˆ
+\ÙYÙš[[Y[Èˆ	‰ˆ\ÛÜOH[ŠHÂˆÛÛ™šYÓÜ[Û›ÛÛ
+ˆ\ÛÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠš[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚ‹YJNÂˆËÐÛÛ™šYÓÜ[Û›ÛÛ
+ˆ[ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û›ÛÛŠ˜Y\]™WÛ^Y\—ÚZYÚŠNÂˆÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠˆ×ÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û‘[[Oš[Ù\]Y[˜ÙOŠœš[ÜÙ\]Y[˜ÙHŠNÂ‚ˆÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŠˆ[Y[\ÙWÛÜH\ËO›Ü[ÛÛÛ™šYÓÜ[Û‘[[O[Y[\ÙU\OŠ[Y[\ÙWÝ\HŠNÂˆ›ÛÛ\×ÜÛ[ÛÝÝ[Y[\ÙHH[Y[\ÙWÛÜOH[ˆ	‰ˆ[Y[\ÙWÛÜO˜[YHOH[Y[\ÙU\NŽÛ[ÛÝÂˆYˆ
+Z\×ÜÛ[ÛÝÝ[Y[\ÙH	‰ˆ
+\ÙYÙš[[Y[ÈOHH
+×ÛÜO˜[YHOHš[Ù\]Y[˜ÙNŽžSØš™XÝ	‰ˆ[WÛØš™XÝÈˆJJJHÂˆYˆ
+\ÛÜO˜[YJHÂˆ\ÛÜO˜[YHH˜[ÙNÂˆÚ[™ÙYÚÙ^\Ëœ\ÚØ˜XÚÊ™[˜X›WÜš[YWÝÝÙ\ˆŠNÂˆBˆËÙ\ÛÜO˜[YHH˜[ÙNÂˆB‚ˆYˆ
+\ÛÜO˜[YJHÂˆYˆ
+\ÛÛÜ
+HÂˆYˆ
+\ÛÛÜO˜[YJHÂˆ\ÛÛÜO˜[YHH˜[ÙNÂˆÚ[™ÙYÚÙ^\Ëœ\ÚØ˜XÚÊš[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚŠNÂˆBˆËÚ\ÛÛÜO˜[YHH˜[ÙNÂˆBˆËÚYˆ
+[ÛÜ
+HÂˆËÈYˆ
+[ÛÜO˜[YJHÂˆËÈ[ÛÜO˜[YHH˜[ÙNÂˆËÈÚ[™ÙYÚÙ^\Ëœ\ÚØ˜XÚÊ˜Y\]™WÛ^Y\—ÚZYÚŠNÂˆËÈBˆËÈËØ[ÛÜO˜[YHH˜[ÙNÂˆËßBˆBˆÊˆ”ûï&“]\Ø[™ÒÚ[™ÈH\ÙH™ÛØ˜[OœÝ\ÜO’[™\[™[Ý\Ü^Y\ˆZYÚˆÚYÙ]È™\XÙH™]š[Ý\È\ÜÚYÛ›Y[ˆ[ÙHÂˆYˆ
+\ÛÛÜ
+HÂˆYˆ
+Z\ÛÛÜO˜[YJHÂˆ\ÛÛÜO˜[YHHYNÂˆÚ[™ÙYÚÙ^\Ëœ\ÚØ˜XÚÊš[™\[™[ÜÝ\ÜÛ^Y\—ÚZYÚŠNÂˆBˆËÚ\ÛÛÜO˜[YHHYNÂˆBˆBˆ
+‹ÂˆB‚ˆ™]\›ˆÚ[™ÙYÚÙ^\ÎÂŸB‚›ÚY[™WÛYØXÞWÜÛJ[˜[ZXÔš[ÛÛ™šYÈ	˜ÛÛ™šYÊBžÂˆ›Üˆ
+ÝŽœÝš[™ÈÛÜœˆˆÈœ™[]]™WØÛÜœ™XÝ[Ûˆ‹›X]\šX[ØÛÜœ™XÝ[ÛˆŸJHÂˆYˆ
+ÛÛ™šYËš\ÊÛÜœŠJHÂˆYˆ
+ÝŽœÝš[™ÈÛÜœ—ÞHÛÜœˆ
+È—ÞŽÈXÛÛ™šYËš\ÊÛÜœ—Þ
+JHÂˆ]]ÊˆÜHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ŠÛÜœ—ÞYJNÂˆÜO˜[YHHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ÏŠÛÜœŠKO˜[Y\ÖÌNÂˆB‚ˆYˆ
+ÝŽœÝš[™ÈÛÜœ—ÞHHÛÜœˆ
+È—ÞHŽÈXÛÛ™šYËš\ÊÛÜœ—ÞJJHÂˆ]]ÊˆÜHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ŠÛÜœ—ÞKYJNÂˆÜO˜[YHHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ÏŠÛÜœŠKO˜[Y\ÖÌNÂˆB‚ˆYˆ
+ÝŽœÝš[™ÈÛÜœ—ÞˆHÛÜœˆ
+È—ÞˆŽÈXÛÛ™šYËš\ÊÛÜœ—ÞŠJHÂˆ]]ÊˆÜHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ŠÛÜœ—Þ‹YJNÂˆÜO˜[YHHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û‘›Ø]ÏŠÛÜœŠKO˜[Y\ÖÌWNÂˆBˆBˆBŸB‚›ÚY[˜[ZXÔš[ÛÛ™šYÎŽœÙ]Û[WÙ^Y\œÊ[œÚYÛ™Y[[WÙ^Y\œÊBžÂˆÛÛœÝ]]È	™Y˜][ÈH[š[ÛÛ™šYÎŽ™Y˜][Ê
+NÂˆ›Üˆ
+ÛÛœÝÝŽœÝš[™È	šÙ^Hˆš[ØÛÛ™šY×ÙY‹™^Y\—ÛÜ[Û—ÚÙ^\Ê
+JHÂˆYˆ
+Ù^HOH™Y˜][Ùš[[Y[Ü›Ùš[HŠBˆËÈÛ‰Ý™\Ú^™H\ÈšY[\È]\È™\Ù[YÈH\Ù\ˆ]H‘\[™[˜ÚY\ÈˆYÙHÙˆHš[\ˆ›Ùš[H[™ÙHÛ‰ÝØ[È™\Ù[ˆËÈ[\HšY[È\™KYˆ›ÝYš[™YžHHÞ\Ý[H›Ùš[K‚ˆÛÛ[YNÂˆ]]È
+›ÜH\ËO›Ü[ÛŠÙ^K˜[ÙJNÂˆ\ÜÙ\
+ÜOH[ŠNÂˆ\ÜÙ\
+ÜOš\×Ý™XÝÜŠ
+JNÂˆYˆ
+ÜOH[ˆ	‰ˆÜOš\×Ý™XÝÜŠ
+JBˆÝ]X×ØØ\ÝÛÛ™šYÓÜ[Û•™XÝÜ˜\ÙJŠÜ
+KOœ™\Ú^™J[WÙ^Y\œËY˜][Ë›Ü[ÛŠÙ^JJNÂˆBŸB‚‹ËÈ”Â›ÚY[˜[ZXÔš[ÛÛ™šYÎŽœÙ]Û[WÙš[[Y[Ê[œÚYÛ™Y[[WÙš[[Y[ÊBžÂˆÛÛœÝ]]ÉˆY˜][ÈH[š[ÛÛ™šYÎŽ™Y˜][Ê
+NÂˆ›Üˆ
+ÛÛœÝÝŽœÝš[™ÉˆÙ^Hˆš[ØÛÛ™šY×ÙY‹™š[[Y[ÛÜ[Û—ÚÙ^\Ê
+JHÂˆYˆ
+Ù^HOH™Y˜][Ùš[[Y[Ü›Ùš[HŠBˆËÈÛ‰Ý™\Ú^™H\ÈšY[\È]\È™\Ù[YÈH\Ù\ˆ]H‘\[™[˜ÚY\ÈˆYÙHÙˆHš[\ˆ›Ùš[H[™ÙHÛ‰ÝØ[È™\Ù[ˆËÈ[\HšY[È\™KYˆ›ÝYš[™YžHHÞ\Ý[H›Ùš[K‚ˆÛÛ[YNÂˆ]]ÊˆÜH\ËO›Ü[ÛŠÙ^K˜[ÙJNÂˆ\ÜÙ\
+ÜOH[ŠNÂˆ\ÜÙ\
+ÜOš\×Ý™XÝÜŠ
+JNÂˆYˆ
+ÜOH[ˆ	‰ˆÜOš\×Ý™XÝÜŠ
+JBˆÝ]X×ØØ\ÝÛÛ™šYÓÜ[Û•™XÝÜ˜\ÙJŠÜ
+KOœ™\Ú^™J[WÙš[[Y[ËY˜][Ë›Ü[ÛŠÙ^JJNÂˆBŸB‚‹ËÐ”Îˆ\ÜÈX\È™XÛÜ™[™È[[˜[Y˜[Y\ÂœÝŽ›X\ÝŽœÝš[™ËÝŽœÝš[™Ïˆ[˜[ZXÔš[ÛÛ™šYÎŽ˜[Y]J›ÛÛ[™\—ØÛJBžÂˆËÈ[š[ÛÛ™šYÈ\È[š]X[^™Yœ›ÛHHY˜][Ë‚ˆÛÛœÝÛÛ™šYÓÜ[Ûˆ
+›ÜH\ËO›Ü[ÛŠœš[\—ÝXÚ›ÛÙÞH‹˜[ÙJNÂˆ]]Èš[\—ÝXÚ›ÛÙÞHH
+ÜOH[ŠHÈ‘‘ˆˆÝ]X×ØØ\Ýš[\•XÚ›ÛÙÞOŠ[˜[ZX×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û‘[[QÙ[™\šXÊŠÜ
+KO˜[YJNÂˆÝÚ]Ú
+š[\—ÝXÚ›ÛÙÞJHÂˆØ\ÙH‘‘Ž‚ˆÂˆ[š[ÛÛ™šYÈœÎÂˆœË˜\J
+\ËYJNÂˆËÈ™\šYžH\Èš[Ü[ÛœÈ›ÝYÚH[š[ÛÛ™šYË‚ˆ™]\›ˆÛXÌÜŽŽ˜[Y]JœË[™\—ØÛJNÂˆBˆY˜][‚ˆËÑ’VQH›È˜[Y][ÛˆÛˆÓH]OÂˆ™]\›ˆÝŽ›X\ÝŽœÝš[™ËÝŽœÝš[™ÏŠ
+NÂˆBŸB‚œÝŽœÝš[™È[˜[ZXÔš[ÛÛ™šYÎŽ™Ù]Ùš[[Y[Ý\JÝŽœÝš[™È	™\Ü^YYÙš[[Y[Ý\K[Y
+BžÂˆ]]Êˆš[[Y[ÚYH[˜[ZX×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û”Ýš[™ÜÊŠ\ËO›Ü[ÛŠ™š[[Y[ÚYÈŠJNÂˆ]]Êˆš[[Y[Ý\HH[˜[ZX×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û”Ýš[™ÜÊŠ\ËO›Ü[ÛŠ™š[[Y[Ý\HŠJNÂˆ]]Êˆš[[Y[Ú\×ÜÝ\ÜH[˜[ZX×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û›ÛÛÊŠ\ËO›Ü[ÛŠ™š[[Y[Ú\×ÜÝ\ÜŠJNÂ‚ˆYˆ
+Yš[[Y[Ý\JBˆ™]\›ˆˆŽÂ‚ˆYˆ
+Yš[[Y[Ú\×ÜÝ\Ü
+HÂˆYˆ
+š[[Y[Ý\JHÂˆ\Ü^YYÙš[[Y[Ý\HHš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆ™]\›ˆš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆBˆ[ÙHÂˆ\Ü^YYÙš[[Y[Ý\HHˆŽÂˆ™]\›ˆˆŽÂˆBˆBˆ[ÙHÂˆ›ÛÛ\×ÜÝ\ÜHš[[Y[Ú\×ÜÝ\ÜÈš[[Y[Ú\×ÜÝ\ÜO™Ù]Ø]
+Y
+Hˆ˜[ÙNÂˆYˆ
+\×ÜÝ\Ü
+HÂˆYˆ
+š[[Y[ÚY
+HÂˆYˆ
+š[[Y[ÚYO™Ù]Ø]
+Y
+HOH‘Ñ”ÌŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆBˆ[ÙHYˆ
+š[[Y[ÚYO™Ù]Ø]
+Y
+HOH‘Ñ”ÌHŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆBˆ[ÙHÂˆYˆ
+š[[Y[Ý\KO™Ù]Ø]
+Y
+HOH”HŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆBˆ[ÙHYˆ
+š[[Y[Ý\KO™Ù]Ø]
+Y
+HOH”HŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆBˆ[ÙHÂˆ\Ü^YYÙš[[Y[Ý\HHš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆ™]\›ˆš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆBˆBˆBˆ[ÙHÂˆYˆ
+š[[Y[Ý\KO™Ù]Ø]
+Y
+HOH”HŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆH[ÙHYˆ
+š[[Y[Ý\KO™Ù]Ø]
+Y
+HOH”HŠHÂˆ\Ü^YYÙš[[Y[Ý\HH”Ý\”HŽÂˆ™]\›ˆ”KTÈŽÂˆH[ÙHÂˆ\Ü^YYÙš[[Y[Ý\HHš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆ™]\›ˆš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆBˆBˆBˆ[ÙHÂˆ\Ü^YYÙš[[Y[Ý\HHš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆ™]\›ˆš[[Y[Ý\KO™Ù]Ø]
+Y
+NÂˆBˆBˆ™]\›ˆ”HŽÂŸB‚˜›ÛÛ[˜[ZXÔš[ÛÛ™šYÎŽš\×ØÝ\ÝÛWÙYš[™Y
+
+BžÂˆ]]Êˆ\×ØÝ\ÝÛWÙYš[™YH[˜[ZX×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û”Ýš[™ÜÊŠ\ËO›Ü[ÛŠš\×ØÝ\ÝÛWÙYš[™YŠJNÂˆYˆ
+Z\×ØÝ\ÝÛWÙYš[™Y\×ØÝ\ÝÛWÙYš[™YO™[\J
+JBˆ™]\›ˆ˜[ÙNÂˆYˆ
+\×ØÝ\ÝÛWÙYš[™YO™Ù]Ø]
+
+HOHŒHŠBˆ™]\›ˆYNÂˆ™]\›ˆ˜[ÙNÂŸB‚‹ËÐ”Îˆ\ÜÈX\È™XÛÜ™[™È[[˜[Y˜[Y\Â‹ËÑ’VQHØØ[^™H\È[˜Ý[Û‹‚œÝŽ›X\ÝŽœÝš[™ËÝŽœÝš[™Ïˆ˜[Y]JÛÛœÝ[š[ÛÛ™šYÈ	˜Ù™Ë›ÛÛ[™\—ØÛJBžÂˆÝŽ›X\ÝŽœÝš[™ËÝŽœÝš[™Ïˆ\œ›Ü—ÛY\ÜØYÙNÂˆËÈK[^Y\‹ZZYÚˆYˆ
+Ù™Ë™Ù]ØXœ×Ý˜[YJ›^Y\—ÚZYÚŠHH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ›^Y\—ÚZYÚ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™Ù]ØXœ×Ý˜[YJ›^Y\—ÚZYÚŠJJNÂˆBˆ[ÙHYˆ
+˜XœÊ›[Ù
+Ù™Ë™Ù]ØXœ×Ý˜[YJ›^Y\—ÚZYÚŠKÐÐSS‘×ÑPÕÔŠJHˆYKM
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ›^Y\—ÚZYÚ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™Ù]ØXœ×Ý˜[YJ›^Y\—ÚZYÚŠJJNÂˆB‚ˆËÈKYš\œÝ[^Y\‹ZZYÚˆYˆ
+Ù™Ëš[š]X[Û^Y\—Üš[ÚZYÚ˜[YHH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJš[š]X[Û^Y\—Üš[ÚZYÚ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ëš[š]X[Û^Y\—Üš[ÚZYÚ˜[YJJNÂˆB‚ˆËÈKYš[[Y[YX[Y]\‚ˆ›Üˆ
+ÝX›H™ˆÙ™Ë™š[[Y[ÙX[Y]\‹˜[Y\ÊBˆYˆ
+™JHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™š[[Y[ÙX[Y]\ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ë™š[[Y[ÙX[Y]\‹œÙ\šX[^™J
+JNÂˆœ™XZÎÂˆB‚ˆËÈK[›Þž›KYX[Y]\‚ˆ›Üˆ
+ÝX›H™ˆÙ™Ë››Þž›WÙX[Y]\‹˜[Y\ÊBˆYˆ
+™ŒJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ››Þž›WÙX[Y]\ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ë››Þž›WÙX[Y]\‹œÙ\šX[^™J
+JNÂˆœ™XZÎÂˆB‚ˆËÈK\\š[Y]\œÂˆYˆ
+Ù™ËØ[ÛÛÜË˜[YH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJØ[ÛÛÜÈ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËØ[ÛÛÜË˜[YJJNÂˆB‚ˆËÈK\ÛÛY[^Y\œÂˆYˆ
+Ù™ËÜÜÚ[Û^Y\œÈ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJÜÜÚ[Û^Y\œÈ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËÜÜÚ[Û^Y\œÊJNÂˆBˆYˆ
+Ù™Ë˜›ÝÛWÜÚ[Û^Y\œÈ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ˜›ÝÛWÜÚ[Û^Y\œÈ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë˜›ÝÛWÜÚ[Û^Y\œÊJNÂˆB‚ˆYˆ
+Ù™Ë\ÙWÙš\›]Ø\™WÜ™]˜XÝ[Û‹˜[YH	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ’Û\\ˆ	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ”Û[ÛÝYH	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ”™\˜\Üš[\ˆ	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ”™\˜\š\›]Ø\™H	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ“X\›[“YØXÞH	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ“X\›[‘š\›]Ø\™H	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ“XXÚ[™ZÚ]	‰‚ˆÙ™Ë™ØÛÙWÙ›]›Ü‹˜[YHOHØÙ”™\]Y\ŠBˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ\ÙWÙš\›]Ø\™WÜ™]˜XÝ[Ûˆ‹‹K]\ÙKYš\›]Ø\™K\™]˜XÝ[Ûˆ\ÈÛ›HÝ\ÜYžHÛ\\‹X\›[‹Û[ÛÝYK™\˜\š\›]Ø\™K™\]Y\ˆ[™XXÚ[™ZÚ]š\›]Ø\™HŠNÂ‚ˆYˆ
+Ù™Ë\ÙWÙš\›]Ø\™WÜ™]˜XÝ[Û‹˜[YJBˆ›Üˆ
+[œÚYÛ™YÚ\ˆÚ\HˆÙ™ËÚ\K˜[Y\ÊBˆYˆ
+Ú\JBˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ\ÙWÙš\›]Ø\™WÜ™]˜XÝ[Ûˆ‹‹K]\ÙKYš\›]Ø\™K\™]˜XÝ[Ûˆ\È›ÝÛÛ\]X›HÚ]K]Ú\HŠNÂˆˆËÈKYØÛÙKY›]›Ü‚ˆYˆ
+Hš[ØÛÛ™šY×ÙY‹™Ù]
+™ØÛÙWÙ›]›ÜˆŠKOš\×Ù[[WÝ˜[YJÙ™Ë™ØÛÙWÙ›]›Ü‹œÙ\šX[^™J
+JJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™ØÛÙWÙ›]›Üˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ë™ØÛÙWÙ›]›Ü‹œÙ\šX[^™J
+JNÂˆB‚ˆËÈKYš[\]\›‚ˆYˆ
+Hš[ØÛÛ™šY×ÙY‹™Ù]
+œÜ\œÙWÚ[™š[Ü]\›ˆŠKOš\×Ù[[WÝ˜[YJÙ™ËœÜ\œÙWÚ[™š[Ü]\›‹œÙ\šX[^™J
+JJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJœÜ\œÙWÚ[™š[Ü]\›ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™ËœÜ\œÙWÚ[™š[Ü]\›‹œÙ\šX[^™J
+JNÂˆB‚ˆËÈK]ÜYš[\]\›‚ˆYˆ
+Hš[ØÛÛ™šY×ÙY‹™Ù]
+ÜÜÝ\™˜XÙWÜ]\›ˆŠKOš\×Ù[[WÝ˜[YJÙ™ËÜÜÝ\™˜XÙWÜ]\›‹œÙ\šX[^™J
+JJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJÜÜÝ\™˜XÙWÜ]\›ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™ËÜÜÝ\™˜XÙWÜ]\›‹œÙ\šX[^™J
+JNÂˆB‚ˆËÈKX›ÝÛKYš[\]\›‚ˆYˆ
+Hš[ØÛÛ™šY×ÙY‹™Ù]
+˜›ÝÛWÜÝ\™˜XÙWÜ]\›ˆŠKOš\×Ù[[WÝ˜[YJÙ™Ë˜›ÝÛWÜÝ\™˜XÙWÜ]\›‹œÙ\šX[^™J
+JJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ˜›ÝÛWÜÝ\™˜XÙWÜ]\›ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ë˜›ÝÛWÜÝ\™˜XÙWÜ]\›‹œÙ\šX[^™J
+JNÂˆB‚ˆËÈK\ÛÚ[Yš[\]\›‚ˆYˆ
+\š[ØÛÛ™šY×ÙY‹™Ù]
+š[\›˜[ÜÛÛYÚ[™š[Ü]\›ˆŠKOš\×Ù[[WÝ˜[YJÙ™Ëš[\›˜[ÜÛÛYÚ[™š[Ü]\›‹œÙ\šX[^™J
+JJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJš[\›˜[ÜÛÛYÚ[™š[Ü]\›ˆ‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ëš[\›˜[ÜÛÛYÚ[™š[Ü]\›‹œÙ\šX[^™J
+JNÂˆB‚ˆËÈK\ÚÚ\ZZYÚˆYˆ
+Ù™ËœÚÚ\ÚZYÚ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJœÚÚ\ÚZYÚ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËœÚÚ\ÚZYÚ
+JNÂˆB‚ˆËÈKXœšYÙKY›ÝË\˜][ÂˆYˆ
+Ù™Ë˜œšYÙWÙ›ÝÈH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ˜œšYÙWÙ›ÝÈ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë˜œšYÙWÙ›ÝÊJNÂˆBˆˆËÈKXœšYÙKY›ÝË\˜][ÂˆYˆ
+Ù™Ë˜œšYÙWÙ›ÝÈH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJš[\›˜[ØœšYÙWÙ›ÝÈ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ëš[\›˜[ØœšYÙWÙ›ÝÊJNÂˆB‚ˆËÈ^Y\ˆÛX\˜[˜ÙBˆYˆ
+Ù™Ë™^Y\—ØÛX\˜[˜ÙWÜ˜Y]\ÈH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™^Y\—ØÛX\˜[˜ÙWÜ˜Y]\È‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™^Y\—ØÛX\˜[˜ÙWÜ˜Y]\ÊJNÂˆBˆYˆ
+Ù™Ë™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×Ü›ÙH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×Ü›Ù‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×Ü›Ù
+JNÂˆBˆYˆ
+Ù™Ë™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×ÛYH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×ÛY‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™^Y\—ØÛX\˜[˜ÙWÚZYÚÝ×ÛY
+JNÂˆBˆYˆ
+Ù™Ë››Þž›WÚZYÚH
+Bˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ››Þž›WÚZYÚ‹
+š[˜[Y˜[YHŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë››Þž›WÚZYÚ
+JNÂ‚ˆËÈKY^\Ú[Û‹[][\Y\‚ˆ›Üˆ
+ÝX›H[HˆÙ™Ë™š[[Y[Ù›Ý×Ü˜][Ë˜[Y\ÊBˆYˆ
+[HH
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™š[[Y[Ù›Ý×Ü˜][È‹
+š[˜[Y˜[YHŠH
+ÈÙ™Ë™š[[Y[Ù›Ý×Ü˜][ËœÙ\šX[^™J
+JNÂˆœ™XZÎÂˆB‚ˆËÈK\Ü\˜[]˜\ÙBˆËÙ›Üˆ›Û‹XÛHØ\ÙKÙHÚ[Ü\X[ÙÈ›ÜˆÜ\˜[[ÙHÛÜœ™XÝ[Û‚ˆYˆ
+Ù™ËœÜ\˜[Û[ÙH	‰ˆ[™\—ØÛJHÂˆËÈ›ÝH]ÙHZYÚØ[È]™H[Ü™H[ˆÛ™H\š[Y]\ˆÛˆH›ÝÛBˆËÈÛÛY^Y\œË‚ˆYˆ
+Ù™ËØ[ÛÛÜÈOHJHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJØ[ÛÛÜÈ‹
+’[˜[Y˜[YHÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËØ[ÛÛÜÊJNÂˆËÜ™]\›ˆØ[‰ÝXZÙH[Ü™H[ˆÛ™H\š[Y]\ˆÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YŽÂˆËÜ™]\›ˆØ[‰ÝXZÙH\ÜÈ[ˆÛ™H\š[Y]\ˆÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YŽÂˆB‚ˆYˆ
+Ù™ËœÜ\œÙWÚ[™š[Ù[œÚ]Hˆ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJœÜ\œÙWÚ[™š[Ù[œÚ]H‹
+’[˜[Y˜[YHÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËœÜ\œÙWÚ[™š[Ù[œÚ]JJNÂˆËÜ™]\›ˆ”Ü\˜[˜\ÙH[ÙHØ[ˆÛ›Hš[ÛÝÈØš™XÝËÛÈ[ÝH™YYÈÙ]š[[œÚ]HÈŽÂˆB‚ˆYˆ
+Ù™ËÜÜÚ[Û^Y\œÈˆ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJÜÜÚ[Û^Y\œÈ‹
+’[˜[Y˜[YHÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠH
+ÈÝŽ×ÜÝš[™ÊÙ™ËÜÜÚ[Û^Y\œÊJNÂˆËÜ™]\›ˆ”Ü\˜[˜\ÙH[ÙH\È›ÝÛÛ\]X›HÚ]ÜÛÛY^Y\œÈŽÂˆB‚ˆYˆ
+Ù™Ë™[˜X›WÜÝ\Ü
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™[˜X›WÜÝ\Ü‹
+’[˜[Y˜[YHÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™[˜X›WÜÝ\Ü
+JNÂˆËÜ™]\›ˆ”Ü\˜[˜\ÙH[ÙH\È›ÝÛÛ\]X›HÚ]Ý\ÜŽÂˆBˆYˆ
+Ù™Ë™[™›Ü˜ÙWÜÝ\ÜÛ^Y\œÈˆ
+HÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJ™[™›Ü˜ÙWÜÝ\ÜÛ^Y\œÈ‹
+’[˜[Y˜[YHÚ[ˆÜ\˜[˜\ÙH[ÙH\È[˜X›YˆŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™[™›Ü˜ÙWÜÝ\ÜÛ^Y\œÊJNÂˆËÜ™]\›ˆ”Ü\˜[˜\ÙH[ÙH\È›ÝÛÛ\]X›HÚ]Ý\ÜŽÂˆBˆB‚ˆËÈ^\Ú[ÛˆÚYÂˆÂˆÝX›HX^Û›Þž›WÙX[Y]\ˆHŽÂˆ›Üˆ
+ÝX›H\ˆˆÙ™Ë››Þž›WÙX[Y]\‹˜[Y\ÊBˆX^Û›Þž›WÙX[Y]\ˆHÝŽ›X^
+X^Û›Þž›WÙX[Y]\‹\ŠNÂˆÛÛœÝÚ\ˆ
+ÚYÖ×HHÂˆ›Ý]\—ÝØ[Û[™WÝÚY‹ˆš[›™\—ÝØ[Û[™WÝÚY‹ˆœÜ\œÙWÚ[™š[Û[™WÝÚY‹ˆš[\›˜[ÜÛÛYÚ[™š[Û[™WÝÚY‹ˆÜÜÝ\™˜XÙWÛ[™WÝÚY‹ˆœÝ\ÜÛ[™WÝÚY‹ˆš[š]X[Û^Y\—Û[™WÝÚY‹ˆœÚÚ[—Ú[™š[Û[™WÝÚY‹ˆœÚÙ[]Û—Ú[™š[Û[™WÝÚYŸNÂˆ›Üˆ
+Ú^™WÝHHÈHÚ^™[ÙŠÚYÊHÈÚ^™[ÙŠÚYÖÚWJNÈ
+ÊÈJHÂˆÝŽœÝš[™ÈÙ^JÚYÖÚWJNÂˆYˆ
+Ù™Ë™Ù]ØXœ×Ý˜[YJÙ^KX^Û›Þž›WÙX[Y]\ŠHˆPVÓS‘WÕÒQÓUSTQTˆ
+ˆX^Û›Þž›WÙX[Y]\ŠHÂˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJÙ^K
+ÛÈ\™ÙH[™HÚYŠH
+ÈÝŽ×ÜÝš[™ÊÙ™Ë™Ù]ØXœ×Ý˜[YJÙ^JJJNÂˆËÜ™]\›ˆÝŽœÝš[™Ê•ÛÈ\™ÙH[™HÚYˆŠH
+ÈÙ^NÂˆBˆBˆB‚ˆËÈÝ]Ùˆ˜[™ÙH˜[Y][ÛˆÙˆ[Y\šXÈ˜[Y\Ë‚ˆ›Üˆ
+ÛÛœÝÝŽœÝš[™È	›ÜÚÙ^HˆÙ™ËšÙ^\Ê
+JHÂˆÛÛœÝÛÛ™šYÓÜ[Ûˆ
+›ÜHÙ™Ë›ÜŠÜÚÙ^JNÂˆ\ÜÙ\
+ÜOH[ŠNÂˆÛÛœÝÛÛ™šYÓÜ[Û‘Yˆ
+›ÜYˆHš[ØÛÛ™šY×ÙY‹™Ù]
+ÜÚÙ^JNÂˆ\ÜÙ\
+ÜYˆOH[ŠNÂˆ›ÛÛÝ]ÛÙ—Ü˜[™ÙHH˜[ÙNÂˆÝÚ]Ú
+ÜO\J
+JHÂˆØ\ÙHÛÑ›Ø]‚ˆØ\ÙHÛÔ\˜Ù[‚ˆØ\ÙHÛÑ›Ø]Ü”\˜Ù[‚ˆÂˆ]]È
+™›ÜHÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û‘›Ø]
+ŠÜ
+NÂˆÝ]ÛÙ—Ü˜[™ÙHH›ÜO˜[YHÜY‹O›Z[ˆ›ÜO˜[YHˆÜY‹O›X^Âˆœ™XZÎÂˆBˆØ\ÙHÛÑ›Ø]Î‚ˆØ\ÙHÛÔ\˜Ù[Î‚ˆ›Üˆ
+ÝX›HˆˆÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û•™XÝÜÝX›OŠŠÜ
+KO˜[Y\ÊBˆYˆ
+ˆÜY‹O›Z[ˆˆˆÜY‹O›X^
+HÂˆÝ]ÛÙ—Ü˜[™ÙHHYNÂˆœ™XZÎÂˆBˆœ™XZÎÂˆØ\ÙHÛÒ[‚ˆÂˆ]]È
+š[ÜHÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û’[
+ŠÜ
+NÂˆÝ]ÛÙ—Ü˜[™ÙHH[ÜO˜[YHÜY‹O›Z[ˆ[ÜO˜[YHˆÜY‹O›X^Âˆœ™XZÎÂˆBˆØ\ÙHÛÒ[Î‚ˆ›Üˆ
+[ˆˆÝ]X×ØØ\ÝÛÛœÝÛÛ™šYÓÜ[Û•™XÝÜ[ŠŠÜ
+KO˜[Y\ÊBˆYˆ
+ˆÜY‹O›Z[ˆˆˆÜY‹O›X^
+HÂˆÝ]ÛÙ—Ü˜[™ÙHHYNÂˆœ™XZÎÂˆBˆœ™XZÎÂˆY˜][ŽÂˆBˆYˆ
+Ý]ÛÙ—Ü˜[™ÙJHÂˆYˆ
+\œ›Ü—ÛY\ÜØYÙK™š[™
+ÜÚÙ^JHOH\œ›Ü—ÛY\ÜØYÙK™[™
+
+JBˆ\œ›Ü—ÛY\ÜØYÙK™[\XÙJÜÚÙ^KÜOœÙ\šX[^™J
+H
+È
+ˆ›Ý[ˆ˜[™ÙHŠH
+È–Èˆ
+ÈÝŽ×ÜÝš[™ÊÜY‹O›Z[ŠH
+È‹ˆ
+ÈÝŽ×ÜÝš[™ÊÜY‹O›X^
+H
+È—HŠNÂˆËÜ™]\›ˆÝŽœÝš[™Ê•˜[YHÝ]Ùˆ˜[™ÙNˆˆ
+ÈÜÚÙ^JNÂˆBˆB‚ˆËÈHÛÛ™šYÝ\˜][Ûˆ\È˜[Y‚ˆ™]\›ˆ\œ›Ü—ÛY\ÜØYÙNÂŸB‚‹ËÈXÛ\™H[™[š]X[^™HÝ]XÈØXÚ\ÈÙˆÝ]XÔš[ÛÛ™šYÈ\š]™YÛ\ÜÙ\Ë‚ˆÙYš[™H’S•ÐÓÓ‘’Q×ÐÐPÒWÑSSQS•ÑQ’S’USÓŠ‹]KÓTÔ×ÓSQJHÝ]XÔš[ÛÛ™šYÎŽ”Ý]XÐØXÚOÛ\ÜÈÛXÌÜŽŽÓTÔ×ÓSQOˆ“ÓÔÕÔÐÐU
+ÓTÔ×ÓSQNŽœ×ØØXÚWËÓTÔ×ÓSQJNÂˆÙYš[™H’S•ÐÓÓ‘’Q×ÐÐPÒWÑSSQS•ÒS’UPSVUSÓŠ‹]KÓTÔ×ÓSQJHÛXÌÜŽŽÓTÔ×ÓSQNŽš[š]X[^™WØØXÚJ
+NÂˆÙYš[™H’S•ÐÓÓ‘’Q×ÐÐPÒWÒS’UPSV‘JÓTÔÑT×ÔÑTJHˆ“ÓÔÕÔÔÑTWÑ“Ô—ÑPPÒ
+’S•ÐÓÓ‘’Q×ÐÐPÒWÑSSQS•ÑQ’S’USÓ‹Ë“ÓÔÕÔÕTWÕ×ÔÑTJÓTÔÑT×ÔÑTJJHˆ[š[ØÛÛ™šY×ÜÝ]X×Ú[š]X[^™\Š
+HÈˆÊˆ][™ÈH˜XÙH\™HÈ]›ÚYHÛÛ\[\ˆÈÜ[Z^™HÝ]\È[˜Ý[Û‹ˆ
+‹Èˆ“ÓÔÕÓÑ×Õ’U’PS
+˜XÙJH’[š]X[^š[™ÈÝ]XÔš[ÛÛ™šYÜÈŽÈˆ“ÓÔÕÔÔÑTWÑ“Ô—ÑPPÒ
+’S•ÐÓÓ‘’Q×ÐÐPÒWÑSSQS•ÒS’UPSVUSÓ‹Ë“ÓÔÕÔÕTWÕ×ÔÑTJÓTÔÑT×ÔÑTJJHˆ™]\›ˆNÈˆB”’S•ÐÓÓ‘’Q×ÐÐPÒWÒS’UPSV‘J
+ˆš[Øš™XÝÛÛ™šYËš[™YÚ[ÛÛÛ™šYËXXÚ[™Q[™[ÜPÛÛ™šYËÐÛÙPÛÛ™šYËš[ÛÛ™šYË[š[ÛÛ™šYËˆÓSX]\šX[ÛÛ™šYËÓTš[ÛÛ™šYËÓTš[Øš™XÝÛÛ™šYËÓTš[\ÛÛ™šYËÓQ[š[ÛÛ™šYÊJBœÝ]XÈ[š[ØÛÛ™šY×ÜÝ]X×Ú[š]X[^™YHš[ØÛÛ™šY×ÜÝ]X×Ú[š]X[^™\Š
+NÂ‚‹ËÐ”Îˆ™[[Ý™H[\ÙYÛÛ[X[™Ý\œ™[BÓPXÝ[ÛœÐÛÛ™šYÑYŽŽÓPXÝ[ÛœÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆËÈXÝ[ÛœÎ‚ˆÊ™YˆH\ËO˜Y
+™^ÜÛØšˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜÐ’ˆŠNÂˆY‹OÛÛ\H
+‘^ÜH[Ù[
+ÊH\ÈÐ’‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚‹Ê‚ˆYˆH\ËO˜Y
+™^ÜÜÝ™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜÕ‘ÈŠNÂˆY‹OÛÛ\H
+”ÛXÙHH[Ù[[™^ÜÛÛYÛXÙ\È\ÈÕ‘ËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂŠ‹Â‚ˆÊ™YˆH\ËO˜Y
+™^ÜÜÛH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜÓHŠNÂˆY‹OÛÛ\H
+”ÛXÙHH[Ù[[™^ÜÓHš[[™È^Y\œÈ\È‘ËˆŠNÂˆY‹O˜ÛHH™^Ü\Û_ÛHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆYˆH\ËO˜Y
+™^ÜÌÛYˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘^ÜÓQˆŠNÂˆY‹OÛÛ\H
+‘^Ü›Ú™XÝ\ÈÓQ‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH™š[[˜[YKŒÛYˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê›Ý]]ŒÛYˆŠJNÂ‚ˆYˆH\ËO˜Y
+™^ÜÜÛXÙY]H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘^ÜÛXÚ[™È]HŠNÂˆY‹OÛÛ\H
+‘^ÜÛXÚ[™È]HÈH›Û\‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈHœÛXÚ[™×Ù]WÙ\™XÝÜžHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê˜ØXÚYÙ]HŠJNÂ‚ˆYˆH\ËO˜Y
+›ØYÜÛXÙY]H‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØYÛXÚ[™È]HŠNÂˆY‹OÛÛ\H
+“ØYØXÚYÛXÚ[™È]Hœ›ÛH\™XÝÜžKˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈHœÛXÚ[™×Ù]WÙ\™XÝÜžHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê˜ØXÚYÙ]HŠJNÂ‚ˆÊ™YˆH\ËO˜Y
+™^ÜØ[Yˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜSQˆŠNÂˆY‹OÛÛ\H
+‘^ÜH[Ù[
+ÊH\ÈSQ‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆYˆH\ËO˜Y
+™^ÜÜÝ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜÕŠNÂˆY‹OÛÛ\H
+‘^ÜHØš™XÝÈ\ÈÚ[™ÛHÕˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™^ÜÜÝÈ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘^Ü][\HÕÈŠNÂˆY‹OÛÛ\H
+‘^ÜHØš™XÝÈ\È][\HÕÈÈ\™XÝÜžKˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÊœÝÜ]ŠJNÂ‚ˆÊ™YˆH\ËO˜Y
+™^ÜÙØÛÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘^ÜËXÛÙHŠNÂˆY‹OÛÛ\H
+”ÛXÙHH[Ù[[™^ÜÛÛ]È\ÈËXÛÙKˆŠNÂˆY‹O˜ÛHH™^ÜYØÛÙ_ØÛÙ_ÈŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆÊ™YˆH\ËO˜Y
+™ØÛÙ]šY]Ù\ˆ‹ÛÐ›ÛÛ
+NÂˆËÈ”Îˆ™[[Ý™HÓ
+
+BˆY‹O›X™[H
+‘ËXÛÙHšY]Ù\ˆŠNÂˆY‹OÛÛ\H
+•š\ÝX[^™H[ˆ[™XYHÛXÙY[™Ø]™YËXÛÙKˆŠNÂˆY‹O˜ÛHH™ØÛÙ]šY]Ù\ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆYˆH\ËO˜Y
+œÛXÙH‹ÛÒ[
+NÂˆY‹O›X™[H
+”ÛXÙHŠNÂˆY‹OÛÛ\H
+”ÛXÙHH]\ÎˆX[]\ËK\]HKÝ\œËZ[˜[YŠNÂˆY‹O˜ÛHHœÛXÙHŽÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+š[‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[ŠNÂˆY‹OÛÛ\H
+”ÚÝÈÛÛ[X[™[ˆŠNÂˆY‹O˜ÛHHš[ŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+\Ù]H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+•\Ñ]HŠNÂˆY‹OÛÛ\H
+•\]HHÛÛ™šYÜÈ˜[Y\ÈÙˆÛYˆÈ]\ÝˆŠNÂˆY‹O˜ÛHH\Ù]HŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™ÝÛØ\™ØÚXÚÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+™ÝÛØ\™XXÚ[™\ÈÚXÚÈŠNÂˆY‹OÛÛ\H
+˜ÚXÚÈÚ]\ˆÝ\œ™[XXÚ[™HÝÛØ\™ÛÛ\]X›HÚ]HXXÚ[™\È[ˆH\ÝˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—›XXÚ[™LKšœÛÛŽÛXXÚ[™L‹šœÛÛŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+›ØYÙY˜][š[H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“ØYY˜][š[[Y[ÈŠNÂˆY‹OÛÛ\H
+“ØYš\œÝš[[Y[\ÈY˜][›ÜˆÜÙH›ÝØYYˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›Z[—ÜØ]™H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“Z[š[][HØ]™HŠNÂˆY‹OÛÛ\H
+™^ÜÛYˆÚ]Z[š[][HÚ^™KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›]Ü‹ÛÒ[
+NÂˆY‹O›X™[H
+›]ÜŠNÂˆY‹OÛÛ\H
+›X^šX[™ÛHÛÝ[\ˆ]H›ÜˆÛXÚ[™ËˆŠNÂˆY‹O˜ÛHH›]ÜŽÂˆY‹O˜ÛWÜ\˜[\ÈH˜ÛÝ[ŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+L
+JNÂ‚ˆYˆH\ËO˜Y
+›\Ý‹ÛÒ[
+NÂˆY‹O›X™[H
+›\ÝŠNÂˆY‹OÛÛ\H
+›X^ÛXÚ[™È[YH\ˆ]H[ˆÙXÛÛ™ËˆŠNÂˆY‹O˜ÛHH›\ÝŽÂˆY‹O˜ÛWÜ\˜[\ÈH[YHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+Ì
+JNÂ‚ˆËÈ]\ÝYš[™H™]È\˜[\È\™KÝ\Ú\ÙHÛÛX[[™\˜[HÚXÚÈÚ[˜Z[ˆYˆH\ËO˜Y
+››×ØÚXÚÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“›ÈÚXÚÈŠNÂˆY‹OÛÛ\H
+‘È›Ý[ˆ[žH˜[Y]HÚXÚÜËÝXÚ\ÈËXÛÙH]ÛÛ™›XÝÈÚXÚËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+››Ü›X]]™WØÚXÚÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“›Ü›X]]™HÚXÚÈŠNÂˆY‹OÛÛ\H
+ÚXÚÈH›Ü›X]]™H][\ËˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆÊ™YˆH\ËO˜Y
+š[Ù™™ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[
+‘‘ˆÜ[ÛœÊHŠNÂˆY‹OÛÛ\H
+”ÚÝÈH[\ÝÙˆš[ÑËXÛÙHÛÛ™šYÝ\˜][ÛˆÜ[ÛœËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+š[ÜÛH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’[
+ÓHÜ[ÛœÊHŠNÂˆY‹OÛÛ\H
+”ÚÝÈH[\ÝÙˆÓHš[ÛÛ™šYÝ\˜][ÛˆÜ[ÛœËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆYˆH\ËO˜Y
+š[™›È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+“Ý]][Ù[[™›ÈŠNÂˆY‹OÛÛ\H
+“Ý]]H[Ù[	ÜÈ[™›Ü›X][Û‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™^ÜÜÙ][™ÜÈ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘^ÜÙ][™ÜÈŠNÂˆY‹OÛÛ\H
+‘^ÜÙ][™ÜÈÈHš[KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈHœÙ][™ÜËšœÛÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê›Ý]]šœÛÛˆŠJNÂ‚ˆYˆH\ËO˜Y
+œ\H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”Ù[™›ÙÜ™\ÜÈÈ\HŠNÂˆY‹OÛÛ\H
+”Ù[™›ÙÜ™\ÜÈÈ\KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈHœ\[˜[YHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂŸB‚‹ËÐ”Îˆ™[[Ý™H[\ÙYÛÛ[X[™Ý\œ™[BÓU˜[œÙ›Ü›PÛÛ™šYÑYŽŽÓU˜[œÙ›Ü›PÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆËÈ˜[œÙ›Ü›HÜ[ÛœÎ‚ˆÊ™YˆH\ËO˜Y
+˜[YÛ—ÞH‹ÛÔÚ[
+NÂˆY‹O›X™[H
+[YÛˆHŠNÂˆY‹OÛÛ\H
+[YÛˆH[Ù[ÈHÚ]™[ˆÚ[ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+LL
+JJNÂ‚ˆYˆH\ËO˜Y
+˜Ý]‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+Ý]ŠNÂˆY‹OÛÛ\H
+Ý][Ù[]HÚ]™[ˆ‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÊ‹Â‚‹Ê‚ˆYˆH\ËO˜Y
+˜Ý]ÙÜšY‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+Ý]ŠNÂˆY‹OÛÛ\H
+Ý][Ù[[ˆHH[™H[È[\ÈÙˆHÜXÚYšYYX^Ú^™KˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+
+JNÂ‚ˆYˆH\ËO˜Y
+˜Ý]Þ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+Ý]ŠNÂˆY‹OÛÛ\H
+Ý][Ù[]HÚ]™[ˆˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+˜Ý]ÞH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+Ý]ŠNÂˆY‹OÛÛ\H
+Ý][Ù[]HÚ]™[ˆKˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂŠ‹Â‚ˆÊ™YˆH\ËO˜Y
+˜Ù[\ˆ‹ÛÔÚ[
+NÂˆY‹O›X™[H
+Ù[\ˆŠNÂˆY‹OÛÛ\H
+Ù[\ˆHš[\›Ý[™HÚ]™[ˆÙ[\‹ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[
+™XÌ™
+LL
+JJNÊ‹Â‚ˆYˆH\ËO˜Y
+˜\œ˜[™ÙH‹ÛÒ[
+NÂˆY‹O›X™[H
+\œ˜[™ÙHÜ[ÛœÈŠNÂˆY‹OÛÛ\H
+\œ˜[™ÙHÜ[ÛœÎˆY\ØX›KKY[˜X›KÝ\œËX]]ÈŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆËÙY‹O˜ÛHH˜\œ˜[™Ù_HŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆYˆH\ËO˜Y
+œ™\]][ÛœÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+”™\]][ÛˆÛÝ[ŠNÂˆY‹OÛÛ\H
+”™\]][ÛˆÛÝ[ÙˆHÚÛH[Ù[ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH˜ÛÝ[ŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+™[œÝ\™WÛÛ—Ø™Y‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[œÝ\™HÛˆ™YŠNÂˆY‹OÛÛ\H
+“YHØš™XÝX›Ý™HH™YÚ[ˆ]\È\X[H™[ÝËˆ\ØX›YžHY˜][ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆÊ™YˆH\ËO˜Y
+˜ÛÜH‹ÛÒ[
+NÂˆY‹O›X™[H
+ÛÜHŠNÂˆY‹OÛÛ\S
+‘\XØ]HÛÜY\ÈÙˆ[Ù[ˆŠNÂˆY‹O›Z[ˆHNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÊ‹Â‚ˆÊ™YˆH\ËO˜Y
+™\XØ]WÙÜšY‹ÛÔÚ[
+NÂˆY‹O›X™[H
+‘\XØ]HžHÜšYŠNÂˆY‹OÛÛ\H
+“][\HÛÜY\ÈžHÜ™X][™ÈHÜšYˆŠNÊ‹Â‚ˆYˆH\ËO˜Y
+˜\ÜÙ[X›H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+\ÜÙ[X›HŠNÂˆY‹OÛÛ\H
+\œ˜[™ÙHHÝ\YY[Ù[È[ˆH]H[™Y\™ÙH[H[ˆHÚ[™ÛH[Ù[[ˆÜ™\ˆÈ\™›Ü›HXÝ[ÛœÈÛ˜ÙKˆŠNÂˆËÙY‹O˜ÛHH›Y\™Ù_HŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ™\Ý[š]‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+ÛÛ™\[š]ŠNÂˆY‹OÛÛ\H
+ÛÛ™\H[š]ÈÙˆ[Ù[ˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›ÜšY[‹ÛÒ[
+NÂˆY‹O›X™[H
+“ÜšY[Ü[ÛœÈŠNÂˆY‹OÛÛ\H
+“ÜšY[Ü[ÛœÎˆY\ØX›KKY[˜X›KÝ\œËX]]ÈŠNÂˆËÙY‹O˜ÛHH›ÜšY[ÈŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+
+JNÂ‚ˆÊ™YˆH\ËO˜Y
+œ™\Z\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™\Z\ˆŠNÂˆY‹OÛÛ\H
+”™\Z\ˆH[Ù[	ÜÈY\Ú\ÈYˆ]\È›Û‹[X[šY›ÛY\ÚˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÊ‹Â‚ˆYˆH\ËO˜Y
+œ›Ý]H‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”›Ý]HŠNÂˆY‹OÛÛ\H
+”›Ý][Ûˆ[™ÛH\›Ý[™Hˆ^\È[ˆYÜ™Y\ËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œ›Ý]WÞ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”›Ý]H\›Ý[™ŠNÂˆY‹OÛÛ\H
+”›Ý][Ûˆ[™ÛH\›Ý[™H^\È[ˆYÜ™Y\ËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œ›Ý]WÞH‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”›Ý]H\›Ý[™HŠNÂˆY‹OÛÛ\H
+”›Ý][Ûˆ[™ÛH\›Ý[™HH^\È[ˆYÜ™Y\ËˆŠNÂˆY‹OœÚY]^H°¬ŽÂKËÈYÜ™Y\ËÛ‰Ý™YY˜[œÛ][Û‚ˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+
+JNÂ‚ˆYˆH\ËO˜Y
+œØØ[H‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+”ØØ[HŠNÂˆY‹OÛÛ\H
+”ØØ[HH[Ù[žHH›Ø]˜XÝÜ‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH™˜XÝÜˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘›Ø]
+K™ŠJNÂ‚ˆÊ™YˆH\ËO˜Y
+œÜ]‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ü]ŠNÂˆY‹OÛÛ\H
+‘]XÝ[˜ÛÛ›™XÝY\È[ˆHÚ]™[ˆ[Ù[
+ÊH[™Ü][H[ÈÙ\\˜]HØš™XÝËˆŠNÂ‚ˆYˆH\ËO˜Y
+œØØ[WÝ×Ùš]‹ÛÔÚ[ÊNÂˆY‹O›X™[H
+”ØØ[HÈš]ŠNÂˆY‹OÛÛ\H
+”ØØ[HÈš]HÚ]™[ˆ›Û[YKˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ú[Ê™XÌÙ
+
+JJNÊ‹ÂŸB‚ÓSZ\ØÐÛÛ™šYÑYŽŽÓSZ\ØÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆÊ™YˆH\ËO˜Y
+šYÛ›Ü™WÛ›Û™^\Ý[ØÛÛ™šYÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’YÛ›Ü™H›Û‹Y^\Ý[ÛÛ™šYÈš[\ÈŠNÂˆY‹OÛÛ\H
+‘È›Ý˜Z[YˆHš[HÝ\YYÈK[ØYÙ\È›Ý^\ÝˆŠNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ™šY×ØÛÛ\]Xš[]H‹ÛÑ[[JNÂˆY‹O›X™[H
+‘›ÜØ\™XÛÛ\]Xš[]H[HÚ[ˆØY[™ÈÛÛ™šYÝ\˜][ÛœÈœ›ÛHÛÛ™šYÈš[\È[™›Ú™XÝš[\È
+ÓQ‹SQŠKˆŠNÂˆY‹OÛÛ\H
+•\È™\œÚ[ÛˆÙˆÛ˜\XZÙ\—ÓÜ˜ØHX^H›Ý[™\œÝ[™ÛÛ™šYÝ\˜][ÛœÈ›ÙXÙYžHH™]Ù\ÝÜ˜ØTÛXÙ\ˆ™\œÚ[ÛœËˆ‚ˆ‘›Üˆ^[\K™]Ù\ˆX^H^[™H\ÝÙˆÝ\ÜYš\›]Ø\™H›]›ÜœËˆÛ™HX^HXÚYHÈ‚ˆ˜˜Z[Ý]ÜˆÈÝXœÝ]]H[ˆ[šÛ›ÝÛˆ˜[YHÚ]HY˜][Ú[[HÜˆ™\˜›ÜÙ[KˆŠNÂˆY‹O™[[WÚÙ^\×ÛX\H	ÛÛ™šYÓÜ[Û‘[[O›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[OŽŽ™Ù]Ù[[WÝ˜[Y\Ê
+NÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™\ØX›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[˜X›HŠNÂˆY‹O™[[WÝ˜[Y\Ëœ\ÚØ˜XÚÊ™[˜X›WÜÚ[[ŠNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+˜Z[Ý]Ûˆ[šÛ›ÝÛˆÛÛ™šYÝ\˜][Ûˆ˜[Y\ÈŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘[˜X›H™XY[™È[šÛ›ÝÛˆÛÛ™šYÝ\˜][Ûˆ˜[Y\ÈžH™\˜›ÜÙ[HÝXœÝ]][™È[HÚ]Y˜][ËˆŠJNÂˆY‹O™[[WÛX™[Ëœ\ÚØ˜XÚÊ
+‘[˜X›H™XY[™È[šÛ›ÝÛˆÛÛ™šYÝ\˜][Ûˆ˜[Y\ÈžHÚ[[HÝXœÝ]][™È[HÚ]Y˜][ËˆŠJNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û‘[[O›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[OŠ›ÜØ\™ÛÛ\]Xš[]TÝXœÝ]][Û”[NŽ‘[˜X›JJNÊ‹Â‚ˆÊ™YˆH\ËO˜Y
+›ØY‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØYÛÛ™šYÈš[HŠNÂˆY‹OÛÛ\H
+“ØYÛÛ™šYÝ\˜][Ûˆœ›ÛHHÜXÚYšYYš[Kˆ]Ø[ˆ™H\ÙY[Ü™H[ˆÛ˜ÙHÈØYÜ[ÛœÈœ›ÛH][\Hš[\ËˆŠNÊ‹Â‚ˆYˆH\ËO˜Y
+›ØYÜÙ][™ÜÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØYÙ[™\˜[Ù][™ÜÈŠNÂˆY‹OÛÛ\H
+“ØY›ØÙ\ÜËÛXXÚ[™HÙ][™ÜÈœ›ÛHHÜXÚYšYYš[KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—œÙ][™ÌKšœÛÛŽÜÙ][™Ì‹šœÛÛ—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+›ØYÙš[[Y[È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØYš[[Y[Ù][™ÜÈŠNÂˆY‹OÛÛ\H
+“ØYš[[Y[Ù][™ÜÈœ›ÛHHÜXÚYšYYš[H\ÝˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—™š[[Y[KšœÛÛŽÙš[[Y[‹šœÛÛŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+œÚÚ\ÛØš™XÝÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+”ÚÚ\Øš™XÝÈŠNÂˆY‹OÛÛ\H
+”ÚÚ\ÛÛYHØš™XÝÈ[ˆ\Èš[ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—ŒËKLÍ×ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[Ê
+JNÂ‚ˆYˆH\ËO˜Y
+˜ÛÛ™WÛØš™XÝÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+ÛÛ™HØš™XÝÈŠNÂˆY‹OÛÛ\H
+ÛÛ™HØš™XÝÈ[ˆHØY\ÝˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—ŒKËKLˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[Ê
+JNÂ‚ˆYˆH\ËO˜Y
+\Ù]WÜÙ][™ÜÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØY\Ù]H›ØÙ\ÜËÛXXÚ[™HÙ][™ÜÈÚ[ˆ\Ú[™È\Ù]HŠNÂˆY‹OÛÛ\H
+“ØY\Ù]H›ØÙ\ÜËÛXXÚ[™HÙ][™ÜÈœ›ÛHHÜXÚYšYYš[HÚ[ˆ\Ú[™È\Ù]KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—œÙ][™ÌKšœÛÛŽÜÙ][™Ì‹šœÛÛ—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+\Ù]WÙš[[Y[È‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+“ØY\Ù]Hš[[Y[Ù][™ÜÈÚ[ˆ\Ú[™È\Ù]HŠNÂˆY‹OÛÛ\H
+“ØY\Ù]Hš[[Y[Ù][™ÜÈœ›ÛHHÜXÚYšYYš[HÚ[ˆ\Ú[™È\Ù]KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—™š[[Y[KšœÛÛŽÙš[[Y[‹šœÛÛŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+™ÝÛØ\™ØÚXÚÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘ÝÛØ\™XXÚ[™\ÈÚXÚÈŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›YÚXÚÈÚ]\ˆÝ\œ™[XXÚ[™HÝÛØ\™ÛÛ\]X›HÚ]HXXÚ[™\È[ˆH\ÝˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+™ÝÛØ\™ÜÙ][™ÜÈ‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+™ÝÛØ\™XXÚ[™\ÈÙ][™ÜÈŠNÂˆY‹OÛÛ\H
+•HXXÚ[™HÙ][™ÜÈ\Ý™YYÈÈÈÝÛØ\™ÚXÚÚ[™ËˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—›XXÚ[™LKšœÛÛŽÛXXÚ[™L‹šœÛÛŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+›ØYØ\ÜÙ[X›WÛ\Ý‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“ØY\ÜÙ[X›H\ÝŠNÂˆY‹OÛÛ\H
+“ØY\ÜÙ[X›HØš™XÝ\Ýœ›ÛHÛÛ™šYÈš[KˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH˜\ÜÙ[X›WÛ\ÝšœÛÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆÊ™YˆH\ËO˜Y
+›Ý]]‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“Ý]]š[HŠNÂˆY‹OÛÛ\H
+•Hš[HÚ\™HHÝ]]Ú[™HÜš][ˆ
+Yˆ›ÝÜXÚYšYY]Ú[™H˜\ÙYÛˆH[œ]š[JKˆŠNÂˆY‹O˜ÛHH›Ý]]ÈŽÂ‚ˆYˆH\ËO˜Y
+œÚ[™ÛWÚ[œÝ[˜ÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”Ú[™ÛH[œÝ[˜ÙH[ÙHŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›YHÛÛ[X[™[™H\™Ý[Y[È\™HÙ[È[ˆ^\Ý[™È[œÝ[˜ÙHÙˆÕRHÜ˜ØTÛXÙ\‹‚ˆ›Üˆ[ˆ^\Ý[™ÈÛ˜\XZÙ\—ÓÜ˜ØHÚ[™ÝÈ\ÈXÝ]˜]Yˆ‚ˆ“Ý™\œšY\ÈHœÚ[™ÛWÚ[œÝ[˜ÙWˆÛÛ™šYÝ\˜][Ûˆ˜[YHœ›ÛH\XØ][Ûˆ™Y™\™[˜Ù\ËˆŠNÊ‹Â‚‹Ê‚ˆYˆH\ËO˜Y
+˜]]ÜØ]™H‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+]]ÜØ]™HŠNÂˆY‹OÛÛ\H
+]]ÛX]XØ[H^ÜÝ\œ™[ÛÛ™šYÝ\˜][ÛˆÈHÜXÚYšYYš[KˆŠNÂŠ‹Â‚ˆYˆH\ËO˜Y
+™]Y\ˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘]H\™XÝÜžHŠNÂˆY‹OÛÛ\H
+“ØY[™ÝÜ™HÙ][™ÜÈ]HÚ]™[ˆ\™XÝÜžKˆ\È\È\ÙY[›ÜˆXZ[Z[š[™ÈY™™\™[›Ùš[\ÈÜˆ[˜ÛY[™ÈÛÛ™šYÝ\˜][ÛœÈœ›ÛHH™]ÛÜšÈÝÜ˜YÙKˆŠNÂ‚‚ˆYˆH\ËO˜Y
+›Ý]]\ˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“Ý]]\™XÝÜžHŠNÂˆY‹OÛÛ\H
+“Ý]]\™XÝÜžH›ÜˆH^ÜYš[\ËˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH™\ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+™XYÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+‘XYÈ]™[ŠNÂˆY‹OÛÛ\H
+”Ù]ÈXYÈÙÙÚ[™È]™[ˆ™˜][N™\œ›Ü‹ŽØ\›š[™ËÎš[™›Ë™XYËN˜XÙWˆŠNÂˆY‹O›Z[ˆHÂˆY‹O˜ÛWÜ\˜[\ÈH›]™[ŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[
+JJNÂ‚ˆYˆH\ËO˜Y
+™[˜X›WÝ[Y[\ÙH‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+‘[˜X›H[Y[\ÙH›Üˆš[ŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y\ÈÛXÚ[™ÈÚ[™HÛÛœÚY\™Y\Ú[™È[Y[\ÙKˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆÚYˆ
+Yš[™Y
+ÓTÐ×Õ‘TŠHYš[™Y
+×ÓRS‘ÕÌÌ—×ÊJH	‰ˆYš[™Y
+ÓPÌÔ—ÑÕRJBˆÊ™YˆH\ËO˜Y
+œÝ×Ü™[™\™\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”™[™\ˆÚ]HÛÙØ\™H™[™\™\ˆŠNÂˆY‹OÛÛ\H
+”™[™\ˆÚ]HÛÙØ\™H™[™\™\‹ˆH[™YQTÐHÛÙØ\™H™[™\™\ˆ\ÈØYY[œÝXYÙˆHY˜][Ü[‘Óš]™\‹ˆŠNÂˆY‹O›Z[ˆHÊ‹ÂˆÙ[™YˆÊˆÓTÐ×Õ‘Tˆ
+‹Â‚ˆYˆH\ËO˜Y
+›ØYØÝ\ÝÛWÙØÛÙ\È‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“ØYÝ\ÝÛHËXÛÙHŠNÂˆY‹OÛÛ\H
+“ØYÝ\ÝÛHËXÛÙHœ›ÛHœÛÛ‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH˜Ý\ÝÛWÙØÛÙWÝÛÛÚ[™ÙKšœÛÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+›ØYÙš[[Y[ÚYÈ‹ÛÒ[ÊNÂˆY‹O›X™[H
+“ØYš[[Y[QÈŠNÂˆY‹OÛÛ\H
+“ØYš[[Y[QÈ›ÜˆXXÚØš™XÝˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—ŒK‹ËWˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û’[Ê
+JNÂ‚ˆYˆH\ËO˜Y
+˜[Ý×Û][XÛÛÜ—ÛÛ™\]H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+[ÝÈ][\HÛÛÜœÈÛˆÛ™H]HŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y\œ˜[™ÙHÚ[[ÝÈ][\HÛÛÜœÈÛˆÛ™H]KˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+˜[Ý×Ü›Ý][ÛœÈ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+[ÝÈ›Ý][ÛˆÚ[ˆ\œ˜[™Ú[™ÈŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y\œ˜[™ÙHÚ[[ÝÈ›Ý][ÛˆÚ[ˆXÚ[™ÈØš™XÝËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+YJJNÂ‚ˆYˆH\ËO˜Y
+˜]›ÚYÙ^\Ú[Û—ØØ[WÜ™YÚ[Ûˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+]›ÚY^\Ú[ÛˆØ[Xœ˜]H™YÚ[ÛˆÚ[ˆ\œ˜[™Ú[™ÈŠNÂˆY‹OÛÛ\H
+’Yˆ[˜X›Y\œ˜[™ÙHÚ[]›ÚY^\Ú[ÛˆØ[Xœ˜]H™YÚ[ÛˆÚ[ˆXÚ[™ÈØš™XÝËˆŠNÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+œÚÚ\Û[ÙYšYYÙØÛÙ\È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+”ÚÚ\[ÙYšYYËXÛÙH[ˆÛYˆŠNÂˆY‹OÛÛ\H
+”ÚÚ\H[ÙYšYYËXÛÙH[ˆÛYˆœ›ÛHš[\ˆÜˆš[[Y[™\Ù]ËˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂ‚ˆYˆH\ËO˜Y
+›XZÙ\›X—Û˜[YH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“XZÙ\“Xˆ˜[YHŠNÂˆY‹OÛÛ\H
+“XZÙ\“Xˆ˜[YHÈÙ[™\˜]H\ÈÛY‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›˜[YHŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+›XZÙ\›X—Ý™\œÚ[Ûˆ‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+“XZÙ\“Xˆ™\œÚ[ÛˆŠNÂˆY‹OÛÛ\H
+“XZÙ\“Xˆ™\œÚ[ÛˆÈÙ[™\˜]H\ÈÛY‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH™\œÚ[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™Ê
+JNÂ‚ˆYˆH\ËO˜Y
+›Y]Y]WÛ˜[YH‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+›Y]Y]H˜[YH\ÝŠNÂˆY‹OÛÛ\H
+›Y]Y]H˜[YH\ÝYY[ÈÛY‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—›˜[YLNÛ˜[YLŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+›Y]Y]WÝ˜[YH‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+›Y]Y]H˜[YH\ÝŠNÂˆY‹OÛÛ\H
+›Y]Y]H˜[YH\ÝYY[ÈÛY‹ˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH—˜[YLNÝ˜[YLŽË‹‹—ˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û”Ýš[™ÜÊ
+JNÂ‚ˆYˆH\ËO˜Y
+˜[Ý×Û™]Ù\—Ùš[H‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+[ÝÈÛYˆÚ]™]Ù\ˆ™\œÚ[ÛˆÈ™HÛXÙYŠNÂˆY‹OÛÛ\H
+[ÝÈÛYˆÚ]™]Ù\ˆ™\œÚ[ÛˆÈ™HÛXÙYˆŠNÂˆY‹O˜ÛWÜ\˜[\ÈH›Ü[ÛˆŽÂˆY‹OœÙ]ÙY˜][Ý˜[YJ™]ÈÛÛ™šYÓÜ[Û›ÛÛ
+˜[ÙJJNÂŸB‚˜ÛÛœÝÓPXÝ[ÛœÐÛÛ™šYÑYˆÛWØXÝ[Ûœ×ØÛÛ™šY×ÙYŽÂ˜ÛÛœÝÓU˜[œÙ›Ü›PÛÛ™šYÑYˆÛWÝ˜[œÙ›Ü›WØÛÛ™šY×ÙYŽÂ˜ÛÛœÝÓSZ\ØÐÛÛ™šYÑYˆÛWÛZ\Ø×ØÛÛ™šY×ÙYŽÂ‚‘[˜[ZXÔš[[™ÓPÛÛ™šYÎŽ”š[[™ÓPÛÛ™šYÑYˆ[˜[ZXÔš[[™ÓPÛÛ™šYÎŽœ×ÙYŽÂ‚›ÚY[˜[ZXÔš[[™ÓPÛÛ™šYÎŽš[™WÛYØXÞJØÛÛ™šY×ÛÜ[Û—ÚÙ^H	›ÜÚÙ^KÝŽœÝš[™È	˜[YJHÛÛœÝžÂˆYˆ
+ÛWØXÝ[Ûœ×ØÛÛ™šY×ÙYˆ›Ü[ÛœË™š[™
+ÜÚÙ^JHOHÛWØXÝ[Ûœ×ØÛÛ™šY×ÙYˆ›Ü[ÛœË™[™
+
+H	‰‚ˆÛWÝ˜[œÙ›Ü›WØÛÛ™šY×ÙY‹›Ü[ÛœË™š[™
+ÜÚÙ^JHOHÛWÝ˜[œÙ›Ü›WØÛÛ™šY×ÙY‹›Ü[ÛœË™[™
+
+H	‰‚ˆÛWÛZ\Ø×ØÛÛ™šY×ÙYˆ›Ü[ÛœË™š[™
+ÜÚÙ^JHOHÛWÛZ\Ø×ØÛÛ™šY×ÙYˆ›Ü[ÛœË™[™
+
+JHÂˆš[ÛÛ™šYÑYŽŽš[™WÛYØXÞJÜÚÙ^K˜[YJNÂˆBŸB‚‹ËÈÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYœÂ‚‹ËÈÜ™X]HH™]ÈÛÛ™šYÈYš[š][ÛˆÚ]HX™[[™ÛÛ\‹ËÈ›ÝNˆH
+
+HXXÜ›È\È[™XYH\ÙY›ÜˆP‘S[™ÓÓTˆÙYš[™H™]×ÙYŠÔÒÑVKTKP‘SÓÓT
+HˆYˆH\ËO˜Y
+ÔÒÑVKTJNÈˆY‹O›X™[H
+P‘S
+NÈˆY‹OÛÛ\H
+ÓÓT
+NÂ‚”™XYÛ›TÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŽŽ”™XYÛ›TÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+žšÜ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+Ý\œ™[‹ZÜŠNÂˆY‹OÛÛ\H
+ÛÛZ[œÈ‹ZÜ™\Ù[]H™YÚ[›š[™ÈÙˆHÝ\ÝÛHËXÛÙH›ØÚËˆŠNÂŸB‚”™XYÜš]TÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŽŽ”™XYÜš]TÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+œÜÚ][Ûˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”ÜÚ][ÛˆŠNÂˆY‹OÛÛ\H
+”ÜÚ][ÛˆÙˆH^Y\ˆ]H™YÚ[›š[™ÈÙˆHÝ\ÝÛHËXÛÙH›ØÚËˆYˆHÝ\ÝÛHËXÛÙH˜]™[ÈÛÛY]Ú\™H[ÙK‚ˆš]ÚÝ[Üš]HÈ\È˜\šXX›HÛÈÛ˜\XZÙ\ˆÜ˜ØHÛ›ÝÜÈÚ\™H]˜]™[Èœ›ÛHÚ[ˆ]Ù]ÈÛÛ›Û˜XÚËˆŠNÂ‚ˆYˆH\ËO˜Y
+™WÜ™]˜XÝY‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”™]˜XÝ[ÛˆŠNÂˆY‹OÛÛ\H
+”™]˜XÝ[ÛˆÝ]H]H™YÚ[›š[™ÈÙˆHÝ\ÝÛHËXÛÙH›ØÚËˆYˆHÝ\ÝÛHËXÛÙH[Ý™\ÈH^Y\ˆ^\Ë‚ˆš]ÚÝ[Üš]HÈ\È˜\šXX›HÛÈÛ˜\XZÙ\ˆÜ˜ØHK\™]˜XÝÈÛÜœ™XÝHÚ[ˆ]Ù]ÈÛÛ›Û˜XÚËˆŠNÂ‚ˆYˆH\ËO˜Y
+™WÜ™\Ý\Ù^˜H‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+‘^˜HK\™]˜XÝ[ÛˆŠNÂˆY‹OÛÛ\H
+Ý\œ™[H[›™Y^˜H^Y\ˆš[Z[™ÈY\ˆK\™]˜XÝ[Û‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+™WÜÜÚ][Ûˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+XœÛÛ]HHÜÚ][ÛˆŠNÂˆY‹OÛÛ\H
+Ý\œ™[ÜÚ][ÛˆÙˆH^Y\ˆ^\ËˆÛ›H\ÙYÚ]XœÛÛ]H^Y\ˆY™\ÜÚ[™ËˆŠNÂŸB‚“Ý\”ÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŽŽ“Ý\”ÛXÚ[™ÔÝ]\ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+˜Ý\œ™[Ù^Y\ˆ‹ÛÒ[
+NÂˆY‹O›X™[H
+Ý\œ™[^Y\ˆŠNÂˆY‹OÛÛ\H
+–™\›ËX˜\ÙY[™^ÙˆÝ\œ™[H\ÙY^Y\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+˜Ý\œ™[ÛØš™XÝÚY‹ÛÒ[
+NÂˆY‹O›X™[H
+Ý\œ™[Øš™XÝ[™^ŠNÂˆY‹OÛÛ\H
+”ÜXÚYšXÈ›ÜˆÙ\]Y[X[š[[™Ëˆ™\›ËX˜\ÙY[™^ÙˆÝ\œ™[Hš[YØš™XÝˆŠNÂ‚ˆYˆH\ËO˜Y
+š\×ÝÚ\WÝÝÙ\ˆ‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’\ÈÚ\HÝÙ\ˆŠNÂˆY‹OÛÛ\H
+•Ú]\ˆÜˆ›ÝÚ\HÝÙ\ˆ\È™Z[™ÈÙ[™\˜]Y[ˆHš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+š[š]X[Ù^Y\ˆ‹ÛÒ[
+NÂˆY‹O›X™[H
+’[š]X[^Y\ˆŠNÂˆY‹OÛÛ\H
+–™\›ËX˜\ÙY[™^ÙˆHš\œÝ^Y\ˆ\ÙY[ˆHš[ˆØ[YH\È[š]X[ÝÛÛˆŠNÂ‚ˆYˆH\ËO˜Y
+š[š]X[ÝÛÛ‹ÛÒ[
+NÂˆY‹O›X™[H
+’[š]X[ÛÛŠNÂˆY‹OÛÛ\H
+–™\›ËX˜\ÙY[™^ÙˆHš\œÝ^Y\ˆ\ÙY[ˆHš[ˆØ[YH\È[š]X[Ù^Y\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+š\×Ù^Y\—Ý\ÙY‹ÛÐ›ÛÛÊNÂˆY‹O›X™[H
+’\È^Y\ˆ\ÙYÈŠNÂˆY‹OÛÛ\H
+•™XÝÜˆÙˆ›ÛÛX[œÈÝ][™ÈÚ]\ˆHÚ]™[ˆ^Y\ˆ\È\ÙY[ˆHš[ˆŠNÂ‚ˆËÈÜ[ÛœÈœ›ÛHÈ›Ý\ÙY[ˆÜ˜ØBˆËÈYˆH\ËO˜Y
+š[š]X[Ùš[[Y[Ý\H‹ÛÔÝš[™ÊNÂˆËÈY‹O›X™[H
+’[š]X[š[[Y[\HŠNÂˆËÈY‹OÛÛ\H
+”Ýš[™ÈÛÛZ[š[™Èš[[Y[\HÙˆHš\œÝ\ÙY^Y\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+š\×ÜÚ[™ÛWÙ^Y\—Û][WÛX]\šX[Üš[Z[™È‹ÛÐ›ÛÛ
+NÂˆY‹O›X™[H
+’\ÈÚ[™ÛH^Y\ˆSHš[Z[™ÈŠNÂˆY‹OÛÛ\H
+\™HH^˜H][K[X]\šX[š[Z[™È™YÚ[ÛœÈ\ÙY[ˆ\Èš[ÈŠNÂ‚ˆ™]×ÙYŠš[š]X[Û›×ÜÝ\ÜÙ^Y\ˆ‹ÛÒ[’[š]X[›ÈÝ\Ü^Y\ˆ‹–™\›ËX˜\ÙY[™^ÙˆHš\œÝ^Y\ˆ\ÙY›Üˆš[[™ÈÚ]Ý]Ý\ÜˆØ[YH\È[š]X[Û›×ÜÝ\ÜÝÛÛˆŠNÂˆ™]×ÙYŠš[—ÚXYÝÜ˜\Ù]XÝÞ›Û™H‹ÛÐ›ÛÛ’[ˆXYÜ˜\]XÝ›Û™H‹’[™XØ]\ÈYˆHš\œÝ^Y\ˆÝ™\›\ÈÚ]HXYÜ˜\›Û™KˆŠNÂŸB‚”š[Ý]\ÝXÜÐÛÛ™šYÑYŽŽ”š[Ý]\ÝXÜÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+™^YYÝ›Û[YH‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•›Û[YH\ˆ^Y\ˆŠNÂˆY‹OÛÛ\H
+•Ý[š[[Y[›Û[YH^YY\ˆ^Y\ˆ\š[™ÈH[\™Hš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[ÝÛÛÚ[™Ù\È‹ÛÒ[
+NÂˆY‹O›X™[H
+•Ý[ÛÛÚ[™Ù\ÈŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆÛÛÚ[™Ù\È\š[™ÈHš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+™^YYÝ›Û[YWÝÝ[‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ý[›Û[YHŠNÂˆY‹OÛÛ\H
+•Ý[›Û[YHÙˆš[[Y[\ÙY\š[™ÈH[\™Hš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+™^YYÝÙZYÚ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•ÙZYÚ\ˆ^Y\ˆŠNÂˆY‹OÛÛ\H
+•ÙZYÚ\ˆ^Y\ˆ^YY\š[™ÈH[\™Hš[ˆØ[Ý[]Yœ›ÛHš[[Y[Ù[œÚ]H˜[YH[ˆš[[Y[Ù][™ÜËˆŠNÂ‚ˆYˆH\ËO˜Y
+™^YYÝÙZYÚÝÝ[‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ý[ÙZYÚŠNÂˆY‹OÛÛ\H
+•Ý[ÙZYÚÙˆHš[ˆØ[Ý[]Yœ›ÛHš[[Y[Ù[œÚ]H˜[YH[ˆš[[Y[Ù][™ÜËˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[Û^Y\—ØÛÝ[‹ÛÒ[
+NÂˆY‹O›X™[H
+•Ý[^Y\ˆÛÝ[ŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆ^Y\œÈ[ˆH[\™Hš[ˆŠNÂ‚ˆËÈÜ[ÛœÈœ›ÛHÈ›Ý\ÙY[ˆÜ˜ØBˆÊˆYˆH\ËO˜Y
+››Ü›X[Üš[Ý[YH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[[YH
+›Ü›X[[ÙJHŠNÂˆY‹OÛÛ\H
+‘\Ý[X]Yš[[YHÚ[ˆš[Y[ˆ›Ü›X[[ÙH
+K™Kˆ›Ý[ˆÚ[[[ÙJKˆØ[YH\Èš[Ý[YKˆŠNÂ‚ˆYˆH\ËO˜Y
+›[WÜš[[™×Ù^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+“[X™\ˆÙˆš[[™È^Y\œÈŠNÂˆY‹OÛÛ\H
+“[X™\ˆÙˆ^Y\œÈ\ÙY\š[™ÈHš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+œš[Ý[YH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[[YH
+›Ü›X[[ÙJHŠNÂˆY‹OÛÛ\H
+‘\Ý[X]Yš[[YHÚ[ˆš[Y[ˆ›Ü›X[[ÙH
+K™Kˆ›Ý[ˆÚ[[[ÙJKˆØ[YH\È›Ü›X[Üš[Ý[YKˆŠNÂ‚ˆYˆH\ËO˜Y
+œš[[™×Ùš[[Y[Ý\\È‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+•\ÙYš[[Y[\\ÈŠNÂˆY‹OÛÛ\H
+ÛÛ[XK\Ù\\˜]Y\ÝÙˆ[š[[Y[\\È\ÙY\š[™ÈHš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+œÚ[[Üš[Ý[YH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[[YH
+Ú[[[ÙJHŠNÂˆY‹OÛÛ\H
+‘\Ý[X]Yš[[YHÚ[ˆš[Y[ˆÚ[[[ÙKˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[ØÛÜÝ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ý[ÛÜÝŠNÂˆY‹OÛÛ\H
+•Ý[ÛÜÝÙˆ[X]\šX[\ÙY[ˆHš[ˆØ[Ý[]Yœ›ÛHš[[Y[ØÛÜÝ˜[YH[ˆš[[Y[Ù][™ÜËˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[ÝÙZYÚ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ý[ÙZYÚŠNÂˆY‹OÛÛ\H
+•Ý[ÙZYÚÙˆHš[ˆØ[Ý[]Yœ›ÛHš[[Y[Ù[œÚ]H˜[YH[ˆš[[Y[Ù][™ÜËˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[ÝÚ\WÝÝÙ\—ØÛÜÝ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ý[Ú\HÝÙ\ˆÛÜÝŠNÂˆY‹OÛÛ\H
+•Ý[ÛÜÝÙˆHX]\šX[Ø\ÝYÛˆHÚ\HÝÙ\‹ˆØ[Ý[]Yœ›ÛHš[[Y[ØÛÜÝ˜[YH[ˆš[[Y[Ù][™ÜËˆŠNÂ‚ˆYˆH\ËO˜Y
+Ý[ÝÚ\WÝÝÙ\—Ùš[[Y[‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•Ú\HÝÙ\ˆ›Û[YHŠNÂˆY‹OÛÛ\H
+•Ý[š[[Y[›Û[YH^YYÛˆHÚ\HÝÙ\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+\ÙYÙš[[Y[‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+•\ÙYš[[Y[ŠNÂˆY‹OÛÛ\H
+•Ý[[™ÝÙˆš[[Y[\ÙY[ˆHš[ˆŠNÊ‹ÂŸB‚“Øš™XÝÒ[™›ÐÛÛ™šYÑYŽŽ“Øš™XÝÒ[™›ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+›[WÛØš™XÝÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+“[X™\ˆÙˆØš™XÝÈŠNÂˆY‹OÛÛ\H
+•Ý[[X™\ˆÙˆØš™XÝÈ[ˆHš[ˆŠNÂ‚ˆYˆH\ËO˜Y
+›[WÚ[œÝ[˜Ù\È‹ÛÒ[
+NÂˆY‹O›X™[H
+“[X™\ˆÙˆ[œÝ[˜Ù\ÈŠNÂˆY‹OÛÛ\H
+•Ý[[X™\ˆÙˆØš™XÝ[œÝ[˜Ù\È[ˆHš[Ý[[YYÝ™\ˆ[Øš™XÝËˆŠNÂ‚ˆYˆH\ËO˜Y
+œØØ[H‹ÛÔÝš[™ÜÊNÂˆY‹O›X™[H
+”ØØ[H\ˆØš™XÝŠNÂˆY‹OÛÛ\H
+ÛÛZ[œÈHÝš[™ÈÚ]H[™›Ü›X][ÛˆX›Ý]Ú]ØØ[[™ÈØ\È\YYÈH[™]šYX[Øš™XÝËˆ‚ˆ’[™^[™ÈÙˆHØš™XÝÈ\È™\›ËX˜\ÙY
+š\œÝØš™XÝ\È[™^
+K—ˆ‚ˆ‘^[\Nˆ	ÞŒL	HNL	HŽŒL	ËˆŠNÂ‚ˆYˆH\ËO˜Y
+š[œ]Ùš[[˜[YWØ˜\ÙH‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+’[œ]š[[˜[YHÚ]Ý]^[œÚ[ÛˆŠNÂˆY‹OÛÛ\H
+”ÛÝ\˜ÙHš[[˜[YHÙˆHš\œÝØš™XÝÚ]Ý]^[œÚ[Û‹ˆŠNÂ‚ˆ™]×ÙYŠš[œ]Ùš[[˜[YH‹ÛÔÝš[™Ë‘[[œ]š[[˜[YH‹”ÛÝ\˜ÙHš[[˜[YHÙˆHš\œÝØš™XÝˆŠNÂˆ™]×ÙYŠœ]WÛ˜[YH‹ÛÔÝš[™Ë”]H˜[YH‹“˜[YHÙˆH]HÛXÙYˆŠNÂŸB‚‘[Y[œÚ[ÛœÐÛÛ™šYÑYŽŽ‘[Y[œÚ[ÛœÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆÛÛœÝÝŽœÝš[™ÈÚ[ÝÛÛ\H
+•H™XÝÜˆ\ÈÛÈ[[Y[Îˆ[™HÛÛÜ™[˜]HÙˆHÚ[ˆ˜[Y\È[ˆ[KˆŠNÂˆÛÛœÝÝŽœÝš[™È˜—ÜÚ^™WÝÛÛ\H
+•H™XÝÜˆ\ÈÛÈ[[Y[Îˆ[™H[Y[œÚ[ÛˆÙˆH›Ý[™[™È›Þˆ˜[Y\È[ˆ[KˆŠNÂ‚ˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—Üš[ØÛÛ™^Ú[‹ÛÔÚ[ÊNÂˆY‹O›X™[H
+‘š\œÝ^Y\ˆÛÛ™^[ŠNÂˆY‹OÛÛ\H
+•™XÝÜˆÙˆÚ[ÈÙˆHš\œÝ^Y\ˆÛÛ™^[ˆXXÚ[[Y[\ÈH›ÛÝÚ[™È›Ü›X]ˆ‚ˆ‰ÖÞWIÈ
+[™H\™H›Ø][™Ë\Ú[[X™\œÈ[ˆ[JKˆŠNÂ‚ˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—Üš[ÛZ[ˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+›ÝÛK[YÛÜ›™\ˆÙˆš\œÝ^Y\ˆ›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\HÚ[ÝÛÛ\Â‚ˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—Üš[ÛX^‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•Ü\šYÚÛÜ›™\ˆÙˆš\œÝ^Y\ˆ›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\HÚ[ÝÛÛ\Â‚ˆYˆH\ËO˜Y
+™š\œÝÛ^Y\—Üš[ÜÚ^™H‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”Ú^™HÙˆHš\œÝ^Y\ˆ›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\H˜—ÜÚ^™WÝÛÛ\Â‚ˆYˆH\ËO˜Y
+œš[Ø™YÛZ[ˆ‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+›ÝÛK[YÛÜ›™\ˆÙˆš[™Y›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\HÚ[ÝÛÛ\Â‚ˆYˆH\ËO˜Y
+œš[Ø™YÛX^‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+•Ü\šYÚÛÜ›™\ˆÙˆš[™Y›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\HÚ[ÝÛÛ\Â‚ˆYˆH\ËO˜Y
+œš[Ø™YÜÚ^™H‹ÛÑ›Ø]ÊNÂˆY‹O›X™[H
+”Ú^™HÙˆHš[™Y›Ý[™[™È›ÞŠNÂˆY‹OÛÛ\H˜—ÜÚ^™WÝÛÛ\Â‚ˆ™]×ÙYŠ™š\œÝÛ^Y\—ØÙ[\—Û›×ÝÚ\WÝÝÙ\ˆ‹ÛÑ›Ø]Ë‘š\œÝ^Y\ˆÙ[\ˆÚ]Ý]Ú\HÝÙ\ˆ‹Ú[ÝÛÛ\
+NÂˆ™]×ÙYŠ™š\œÝÛ^Y\—ÚZYÚ‹ÛÑ›Ø]‘š\œÝ^Y\ˆZYÚ‹’ZYÚÙˆHš\œÝ^Y\‹ˆŠNÂŸB‚•[\\˜]\™\ÐÛÛ™šYÑYŽŽ•[\\˜]\™\ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆ™]×ÙYŠ˜™YÝ[\\˜]\™H‹ÛÒ[Ë™Y[\\˜]\™H‹•™XÝÜˆÙˆ™Y[\\˜]\™\È›ÜˆXXÚ^Y\‹Ùš[[Y[ˆŠBˆ™]×ÙYŠ˜™YÝ[\\˜]\™WÚ[š]X[Û^Y\ˆ‹ÛÒ[Ë’[š]X[^Y\ˆ™Y[\\˜]\™H‹•™XÝÜˆÙˆ[š]X[^Y\ˆ™Y[\\˜]\™\È›ÜˆXXÚ^Y\‹Ùš[[Y[ˆ›ÝšY\ÈHØ[YH˜[YH\Èš\œÝÛ^Y\—Ø™YÝ[\\˜]\™KˆŠBˆ™]×ÙYŠ˜™YÝ[\\˜]\™WÚ[š]X[Û^Y\—ÜÚ[™ÛH‹ÛÒ[’[š]X[^Y\ˆ™Y[\\˜]\™H
+X^Ùˆ\ÙYš[[Y[ÊH‹’[š]X[^Y\ˆ™Y[\\˜]\™H›ÜˆHZ^Yš[ˆ\È˜[YH\ÈHX^[][H[š]X[^Y\ˆ™Y[\\˜]\™HÝ™\ˆ[\ÙY^Y\œËÙš[[Y[ËˆŠBˆ™]×ÙYŠ˜Ú[X™\—Ý[\\˜]\™H‹ÛÒ[ËÚ[X™\ˆ[\\˜]\™H‹•™XÝÜˆÙˆÚ[X™\ˆ[\\˜]\™\È›ÜˆXXÚ^Y\‹Ùš[[Y[ˆŠBˆ™]×ÙYŠ›Ý™\˜[ØÚ[X™\—Ý[\\˜]\™H‹ÛÒ[“Ý™\˜[Ú[X™\ˆ[\\˜]\™H‹“Ý™\˜[Ú[X™\ˆ[\\˜]\™Kˆ\È˜[YH\ÈHX^[][HÚ[X™\ˆ[\\˜]\™HÙˆ[žH^Y\‹Ùš[[Y[\ÙYˆŠBˆ™]×ÙYŠ™š\œÝÛ^Y\—Ø™YÝ[\\˜]\™H‹ÛÒ[Ë‘š\œÝ^Y\ˆ™Y[\\˜]\™H‹•™XÝÜˆÙˆš\œÝ^Y\ˆ™Y[\\˜]\™\È›ÜˆXXÚ^Y\‹Ùš[[Y[ˆ›ÝšY\ÈHØ[YH˜[YH\È™YÝ[\\˜]\™WÚ[š]X[Û^Y\‹ˆŠBˆ™]×ÙYŠ™š\œÝÛ^Y\—Ý[\\˜]\™H‹ÛÒ[Ë‘š\œÝ^Y\ˆ[\\˜]\™H‹•™XÝÜˆÙˆš\œÝ^Y\ˆ[\\˜]\™\È›ÜˆXXÚ^Y\‹Ùš[[Y[ˆŠBŸB‚‚•[Y\Ý[\ÐÛÛ™šYÑYŽŽ•[Y\Ý[\ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+[Y\Ý[\‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+•[Y\Ý[\ŠNÂˆY‹OÛÛ\H
+”Ýš[™ÈÛÛZ[š[™ÈÝ\œ™[[YH[ˆ^^^SSYZ[\ÜÈ›Ü›X]ˆŠNÂ‚ˆYˆH\ËO˜Y
+žYX\ˆ‹ÛÒ[
+NÂˆY‹O›X™[H
+–YX\ˆŠNÂ‚ˆYˆH\ËO˜Y
+›[Û‹ÛÒ[
+NÂˆY‹O›X™[H
+“[ÛŠNÂ‚ˆYˆH\ËO˜Y
+™^H‹ÛÒ[
+NÂˆY‹O›X™[H
+‘^HŠNÂ‚ˆYˆH\ËO˜Y
+šÝ\ˆ‹ÛÒ[
+NÂˆY‹O›X™[H
+’Ý\ˆŠNÂ‚ˆYˆH\ËO˜Y
+›Z[]H‹ÛÒ[
+NÂˆY‹O›X™[H
+“Z[]HŠNÂ‚ˆYˆH\ËO˜Y
+œÙXÛÛ™‹ÛÒ[
+NÂˆY‹O›X™[H
+”ÙXÛÛ™ŠNÂŸB‚“Ý\”™\Ù]ÐÛÛ™šYÑYŽŽ“Ý\”™\Ù]ÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚ˆYˆH\ËO˜Y
+œš[Ü™\Ù]‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[™\Ù]˜[YHŠNÂˆY‹OÛÛ\H
+“˜[YHÙˆHš[™\Ù]\ÙY›ÜˆÛXÚ[™ËˆŠNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ü™\Ù]‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+‘š[[Y[™\Ù]˜[YHŠNÂˆY‹OÛÛ\H
+“˜[Y\ÈÙˆHš[[Y[™\Ù]È\ÙY›ÜˆÛXÚ[™ËˆH˜\šXX›H\ÈH™XÝÜˆ‚ˆ˜ÛÛZ[š[™ÈÛ™H˜[YH›ÜˆXXÚ^Y\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+œš[\—Ü™\Ù]‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”š[\ˆ™\Ù]˜[YHŠNÂˆY‹OÛÛ\H
+“˜[YHÙˆHš[\ˆ™\Ù]\ÙY›ÜˆÛXÚ[™ËˆŠNÂ‚ˆYˆH\ËO˜Y
+œ\ÚXØ[Üš[\—Ü™\Ù]‹ÛÔÝš[™ÊNÂˆY‹O›X™[H
+”\ÚXØ[š[\ˆ˜[YHŠNÂˆY‹OÛÛ\H
+“˜[YHÙˆH\ÚXØ[š[\ˆ\ÙY›ÜˆÛXÚ[™ËˆŠNÂ‚ˆYˆH\ËO˜Y
+›[WÙ^Y\œÈ‹ÛÒ[
+NÂˆY‹O›X™[H
+“[X™\ˆÙˆ^Y\œÈŠNÂˆY‹OÛÛ\H
+•Ý[[X™\ˆÙˆ^Y\œË™YØ\™\ÜÈÙˆÚ]\ˆ^H\™H\ÙY[ˆHÝ\œ™[š[ˆŠNÂŸB‚‚œÝ]XÈÝŽ›X\ØÝ\ÝÛWÙØÛÙWÚÙ^KØÛÛ™šY×ÛÜ[Û—ÚÙ^\Ïˆ×ÐÝ\ÝÛQØÛÙTÜXÚYšXÔXÙZÛ\œÞÂˆËÈXXÚ[™HËXÛÙBˆÈ›XXÚ[™WÜÝ\ÙØÛÙH‹ß_KˆÈ›XXÚ[™WÙ[™ÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—Þˆ‹™š[[Y[Ù^Y\—ÚYŸ_KˆÈ˜™Y›Ü™WÛ^Y\—ØÚ[™ÙWÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—ÞˆŸ_KˆÈ›^Y\—ØÚ[™ÙWÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—ÞˆŸ_KˆÈ[Y[\ÙWÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—ÞˆŸ_KˆÈ˜Ú[™ÙWÙš[[Y[ÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—Þˆ‹›™^Ù^Y\ˆ‹œ™]š[Ý\×Ù^Y\ˆ‹™˜[—ÜÜYY‹ˆ™š\œÝÙ›\ÚÝ›Û[YH‹™›\ÚÛ[™ÝÌH‹™›\ÚÛ[™ÝÌˆ‹™›\ÚÛ[™ÝÌÈ‹™›\ÚÛ[™ÝÍ‹ˆ›™]×Ùš[[Y[ÙWÙ™YY˜]H‹›™]×Ùš[[Y[Ý[\‹›™]×Ü™]˜XÝÛ[™Ý‹ˆ›™]×Ü™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹›ÛÙš[[Y[ÙWÙ™YY˜]H‹›ÛÙš[[Y[Ý[\‹›ÛÜ™]˜XÝÛ[™Ý‹ˆ›ÛÜ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹œ™[]]™WÙWØ^\È‹œÙXÛÛ™Ù›\ÚÝ›Û[YH‹ÛÛÚ[™ÙWØÛÝ[‹ÛÛÚ[™ÙWÞˆ‹ˆ˜]™[ÜÚ[ÌWÞ‹˜]™[ÜÚ[ÌWÞH‹˜]™[ÜÚ[Ì—Þ‹˜]™[ÜÚ[Ì—ÞH‹˜]™[ÜÚ[Ì×Þ‹ˆ˜]™[ÜÚ[Ì×ÞH‹žØY\—ÝÛÛÚ[™ÙH‹žWØY\—ÝÛÛÚ[™ÙH‹ž—ØY\—ÝÛÛÚ[™ÙH‹›™^ÝÚ\WÞ‹›™^ÝÚ\WÞHŸ_KˆÈ˜Ú[™ÙWÙ^\Ú[Û—Ü›ÛWÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹™^\Ú[Û—Ü›ÛH‹›\ÝÙ^\Ú[Û—Ü›ÛHŸ_KˆÈœš[[™×ØžWÛØš™XÝÙØÛÙH‹ß_KˆÈ›XXÚ[™WÜ]\ÙWÙØÛÙH‹ß_KˆÈ[\]WØÝ\ÝÛWÙØÛÙH‹ß_KˆËÈš[[Y[ËXÛÙBˆÈ™š[[Y[ÜÝ\ÙØÛÙH‹È™š[[Y[Ù^Y\—ÚYŸ_KˆÈ™š[[Y[Ù[™ÙØÛÙH‹È›^Y\—Û[H‹›^Y\—Þˆ‹›X^Û^Y\—Þˆ‹™š[[Y[Ù^Y\—ÚYŸ_KŸNÂ‚˜ÛÛœÝÝŽ›X\ØÝ\ÝÛWÙØÛÙWÚÙ^KØÛÛ™šY×ÛÜ[Û—ÚÙ^\Ï‰ˆÝ\ÝÛWÙØÛÙWÜÜXÚYšX×ÜXÙZÛ\œÊ
+BžÂˆ™]\›ˆ×ÐÝ\ÝÛQØÛÙTÜXÚYšXÔXÙZÛ\œÎÂŸB‚Ý\ÝÛQØÛÙTÜXÚYšXÐÛÛ™šYÑYŽŽÝ\ÝÛQØÛÙTÜXÚYšXÐÛÛ™šYÑYŠ
+BžÂˆÛÛ™šYÓÜ[Û‘YŠˆYŽÂ‚‹ËÈÛÛ[[ÛˆYœÂˆYˆH\ËO˜Y
+›^Y\—Û[H‹ÛÒ[
+NÂˆY‹O›X™[H
+“^Y\ˆ[X™\ˆŠNÂˆY‹OÛÛ\H
+’[™^ÙˆHÝ\œ™[^Y\‹ˆÛ™KX˜\ÙY
+K™Kˆš\œÝ^Y\ˆ\È[X™\ˆJKˆŠNÂ‚ˆYˆH\ËO˜Y
+›^Y\—Þˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“^Y\ˆˆŠNÂˆY‹OÛÛ\H
+’ZYÚÙˆHÝ\œ™[^Y\ˆX›Ý™HHš[™YYX\Ý\™YÈHÜÙˆH^Y\‹ˆŠNÂ‚ˆYˆH\ËO˜Y
+›X^Û^Y\—Þˆ‹ÛÑ›Ø]
+NÂˆY‹O›X™[H
+“X^[X[^Y\ˆˆŠNÂˆY‹OÛÛ\H
+’ZYÚÙˆH\Ý^Y\ˆX›Ý™HHš[™YˆŠNÂ‚ˆYˆH\ËO˜Y
+™š[[Y[Ù^Y\—ÚY‹ÛÒ[
+NÂˆY‹O›X™[H
+‘š[[Y[^Y\ˆQŠNÂˆY‹OÛÛ\H
+•HÝ\œ™[^Y\ˆQˆHØ[YH\ÈÝ\œ™[Ù^Y\‹ˆŠNÂ‚‹ËÈÚ[™ÙWÙš[[Y[ÙØÛÙBˆ™]×ÙYŠœ™]š[Ý\×Ù^Y\ˆ‹ÛÒ[”™]š[Ý\È^Y\ˆ‹’[™^ÙˆH^Y\ˆ]\È™Z[™È[›ØYYˆH[™^\È™\›È˜\ÙY
+š\œÝ^Y\ˆ\È[™^
+KˆŠNÂˆ™]×ÙYŠ›™^Ù^Y\ˆ‹ÛÒ[“™^^Y\ˆ‹’[™^ÙˆH^Y\ˆ]\È™Z[™ÈØYYˆH[™^\È™\›È˜\ÙY
+š\œÝ^Y\ˆ\È[™^
+KˆŠNÂˆ™]×ÙYŠœ™[]]™WÙWØ^\È‹ÛÐ›ÛÛ”™[]]™HKX^\È‹’[™XØ]\ÈYˆ™[]]™HÜÚ][Ûš[™È\È™Z[™È\ÙYˆŠNÂˆ™]×ÙYŠÛÛÚ[™ÙWØÛÝ[‹ÛÒ[•ÛÛÚ[™ÙHÛÝ[‹•H[X™\ˆÙˆÛÛÚ[™Ù\È›ÝYÚHš[ˆŠNÂˆ™]×ÙYŠ™˜[—ÜÜYY‹ÛÓ›Û™Kˆ‹ˆŠNÈËÓÜ[Ûˆ\È›ÈÛ™Ù\ˆ\ÙY[™\È™\›ÙYžHXÙZÛ\ˆ\œÙ\ˆ›ÜˆÛÛ\]Xš[]Bˆ™]×ÙYŠ›ÛÜ™]˜XÝÛ[™Ý‹ÛÑ›Ø]“Û™]˜XÝ[™Ý‹•H™]˜XÝ[Ûˆ[™ÝÙˆH™]š[Ý\Èš[[Y[ŠNÂˆ™]×ÙYŠ›™]×Ü™]˜XÝÛ[™Ý‹ÛÑ›Ø]“™]È™]˜XÝ[™Ý‹•H™]˜XÝ[Ûˆ[™ÚÙˆH™]Èš[[Y[ŠNÂˆ™]×ÙYŠ›ÛÜ™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹ÛÑ›Ø]“Û™]˜XÝ[™ÝÛÛÚ[™ÙH‹•HÛÛÚ[™ÙH™]˜XÝ[Ûˆ[™ÝÙˆH™]š[Ý\Èš[[Y[ŠNÂˆ™]×ÙYŠ›™]×Ü™]˜XÝÛ[™ÝÝÛÛÚ[™ÙH‹ÛÑ›Ø]“™]È™]˜XÝ[™ÝÛÛÚ[™ÙH‹•HÛÛÚ[™ÙH™]˜XÝ[Ûˆ[™ÝÙˆH™]Èš[[Y[ŠNÂˆ™]×ÙYŠ›ÛÙš[[Y[Ý[\‹ÛÒ[“Ûš[[Y[[\‹•HÛš[[Y[[\ŠNÂˆ™]×ÙYŠ›™]×Ùš[[Y[Ý[\‹ÛÒ[“™]Èš[[Y[[\‹•H™]Èš[[Y[[\ŠNÂˆ™]×ÙYŠžØY\—ÝÛÛÚ[™ÙH‹ÛÑ›Ø]–Y\ˆÛÛÚ[™ÙH‹•HÜÈY\ˆÛÛÚ[™ÙHŠNÂˆ™]×ÙYŠžWØY\—ÝÛÛÚ[™ÙH‹ÛÑ›Ø]–HY\ˆÛÛÚ[™ÙH‹•HHÜÈY\ˆÛÛÚ[™ÙHŠNÂˆ™]×ÙYŠž—ØY\—ÝÛÛÚ[™ÙH‹ÛÑ›Ø]–ˆY\ˆÛÛÚ[™ÙH‹•HˆÜÈY\ˆÛÛÚ[™ÙHŠNÂˆ™]×ÙYŠ™š\œÝÙ›\ÚÝ›Û[YH‹ÛÑ›Ø]‘š\œÝ›\Ú›Û[YH‹•Hš\œÝ›\Ú›Û[YHŠNÂˆ™]×ÙYŠœÙXÛÛ™Ù›\ÚÝ›Û[YH‹ÛÑ›Ø]”ÙXÛÛ™›\Ú›Û[YH‹•HÙXÛÛ™›\Ú›Û[YHŠNÂˆ™]×ÙYŠ›ÛÙš[[Y[ÙWÙ™YY˜]H‹ÛÒ[“Ûš[[Y[H™YY˜]H‹•HÛš[[Y[^Y\ˆ™YY˜]HŠNÂˆ™]×ÙYŠ›™]×Ùš[[Y[ÙWÙ™YY˜]H‹ÛÒ[“™]Èš[[Y[H™YY˜]H‹•H™]Èš[[Y[^Y\ˆ™YY˜]HŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[ÌWÞ‹ÛÑ›Ø]•˜]™[Ú[H‹•H˜]™[Ú[HŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[ÌWÞH‹ÛÑ›Ø]•˜]™[Ú[HH‹•H˜]™[Ú[HHŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[Ì—Þ‹ÛÑ›Ø]•˜]™[Ú[ˆ‹•H˜]™[Ú[ˆŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[Ì—ÞH‹ÛÑ›Ø]•˜]™[Ú[ˆH‹•H˜]™[Ú[ˆHŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[Ì×Þ‹ÛÑ›Ø]•˜]™[Ú[È‹•H˜]™[Ú[ÈŠNÂˆ™]×ÙYŠ˜]™[ÜÚ[Ì×ÞH‹ÛÑ›Ø]•˜]™[Ú[ÈH‹•H˜]™[Ú[ÈHŠNÂˆ™]×ÙYŠ™›\ÚÛ[™ÝÌH‹ÛÑ›Ø]‘›\Ú[™ÝH‹•Hš\œÝ›\Ú[™ÝŠNÂˆ™]×ÙYŠ™›\ÚÛ[™ÝÌˆ‹ÛÑ›Ø]‘›\Ú[™Ýˆ‹•HÙXÛÛ™›\Ú[™ÝŠNÂˆ™]×ÙYŠ™›\ÚÛ[™ÝÌÈ‹ÛÑ›Ø]‘›\Ú[™ÝÈ‹•H\™›\Ú[™ÝŠNÂˆ™]×ÙYŠ™›\ÚÛ[™ÝÍ‹ÛÑ›Ø]‘›\Ú[™Ý‹•H›Ý\›\Ú[™ÝŠNÂˆ™]×ÙYŠ›™^ÝÚ\WÞ‹ÛÑ›Ø]“™^Ú\H‹‘›ÜˆÛ˜\XZÙ\ˆ\\Ú[Û‹™^Y\ˆÛÛÚ[™ÙHŠNÂˆ™]×ÙYŠ›™^ÝÚ\WÞH‹ÛÑ›Ø]“™^Ú\HH‹‘›ÜˆÛ˜\XZÙ\ˆ\\Ú[Û‹™^HY\ˆÛÛÚ[™ÙHŠNÂ‚‹ËÈÚ[™ÙWÙ^\Ú[Û—Ü›ÛWÙØÛÙBˆÝŽœÝš[™È^\Ú[Û—Ü›ÛWÝ\\ÈH”ÜÜÚX›H˜[Y\Î—–×”\š[Y]\—‹‘^\›˜[\š[Y]\—‹‚ˆ—“Ý™\š[™Ô\š[Y]\—‹’[\›˜[[™š[‹”ÛÛY[™š[‹•ÜÛÛY[™š[‹›ÝÛTÝ\™˜XÙW‹œšYÙR[™š[‹‘Ø\š[‹’\›Ûš[™×‹‚ˆ—”ÚÚ\‹œš[W‹”Ý\ÜX]\šX[‹”Ý\ÜX]\šX[[\™˜XÙW‹”Ý\Ü˜[œÚ][Û—‹•Ú\UÝÙ\—‹“Z^Y—HŽÂ‚ˆ™]×ÙYŠ™^\Ú[Û—Ü›ÛH‹ÛÔÝš[™Ë‘^\Ú[Ûˆ›ÛH‹•H™]È^\Ú[Ûˆ›ÛKÝ\H]\ÈÛÚ[™ÈÈ™H\ÙYˆˆ
+È^\Ú[Û—Ü›ÛWÝ\\ÊNÂˆ™]×ÙYŠ›\ÝÙ^\Ú[Û—Ü›ÛH‹ÛÔÝš[™Ë“\Ý^\Ú[Ûˆ›ÛH‹•H™]š[Ý\ÛH\ÙY^\Ú[Ûˆ›ÛKÝ\W”ÜÜÚX›H˜[Y\Î—ˆˆ
+È^\Ú[Û—Ü›ÛWÝ\\ÊNÂŸB‚˜ÛÛœÝÝ\ÝÛQØÛÙTÜXÚYšXÐÛÛ™šYÑYˆÝ\ÝÛWÙØÛÙWÜÜXÚYšX×ØÛÛ™šY×ÙYŽÂ‚ˆÝ[™Yˆ™]×ÙY‚‚Z[Ý[Ù[ÛÛ™šYÎŽœ×Û\ÝÝ[Y\Ý[\HNÂ‚œÝ]XÈÚ[È×ÜÚ[ÊÛÛœÝÝŽ™XÝÜ™XÌ™ˆ	™ÊBžÂˆÚ[ÈÎÈËœ™\Ù\™JËœÚ^™J
+JNÂˆ›Üˆ
+]]È	ˆˆÊBˆË™[\XÙWØ˜XÚÊÛÛÜ™Ý
+ØØ[WÊ‹ž
+
+JJKÛÛÜ™Ý
+ØØ[WÊ‹žJ
+JJH
+NÂˆ™]\›ˆÎÂŸB‚”Ú[ÈÙ]Ø™YÜÚ\JÛÛœÝ[˜[ZXÔš[ÛÛ™šYÈ	˜ÛÛ™šYÊBžÂˆÛÛœÝ]]È
+˜™YÜÚ\WÛÜHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û”Ú[ÏŠœš[X›WØ\™XHŠNÂˆYˆ
+X™YÜÚ\WÛÜ
+HÂ‚ˆËÈ\™K]\ÈÙ\Z[ˆ]H™YÚ\H\ÈZ\ÜÚ[™ËÛÈ[ˆ[™š[š]HÛ™BˆËÈ\ÈÈ™H\ÙY]Ý[HÙ[\ˆÙˆ™YØ[ˆ™H]Y\šYYˆYˆ
+]]ÈÙ[\—ÛÜHÛÛ™šYË›ÜÛÛ™šYÓÜ[Û”Ú[Š˜Ù[\ˆŠJBˆ™]\›ˆÈØØ[Y
+Ù[\—ÛÜO˜[YJHNÂ‚ˆ™]\›ˆßNÂˆB‚ˆ™]\›ˆ×ÜÚ[ÊXZÙWØÛÝ[\—ØÛØÚÝÚ\ÙJ™YÜÚ\WÛÜO˜[Y\ÊJNÂŸB‚”Ú[ÈÙ]Ø™YÜÚ\JÛÛœÝš[ÛÛ™šYÈ	˜Ù™ÊBžÂˆ™]\›ˆ×ÜÚ[ÊXZÙWØÛÝ[\—ØÛØÚÝÚ\ÙJÙ™Ëœš[X›WØ\™XK˜[Y\ÊJNÂŸB‚”Ú[ÈÙ]Ø™YÜÚ\JÛÛœÝÓTš[\ÛÛ™šYÈ	˜Ù™ÊHÈ™]\›ˆ×ÜÚ[ÊXZÙWØÛÝ[\—ØÛØÚÝÚ\ÙJÙ™Ëœš[X›WØ\™XK˜[Y\ÊJNÈB‚”ÛYÛÛœÈÙ]Ø™YÙ^ÛYYØ\™XJÛÛœÝš[ÛÛ™šYÉˆÙ™ÊBžÂˆÛÛœÝÚ[œÈ^ÛYWØ\™XWÜÚ[ÈHÙ™Ë˜™YÙ^ÛYWØ\™XK˜[Y\ÎÂ‚ˆÛYÛÛˆ^ÛYWÜÛNÂˆ›Üˆ
+[HHÈH^ÛYWØ\™XWÜÚ[ËœÚ^™J
+NÈJÊÊHÂˆ]]ÈH^ÛYWØ\™XWÜÚ[ÖÚWNÂˆ^ÛYWÜÛKœÚ[Ë™[\XÙWØ˜XÚÊØØ[WÊž
+
+JKØØ[WÊžJ
+JJNÂˆB‚ˆ^ÛYWÜÛK›XZÙWØÛÝ[\—ØÛØÚÝÚ\ÙJ
+NÂ‚ˆ™]\›ˆÙ^ÛYWÜÛ_NÂŸB‚”ÛYÛÛˆÙ]Ø™YÜÚ\WÝÚ]Ù^ÛYYØ\™XJÛÛœÝš[ÛÛ™šYÉˆÙ™ÊBžÂˆÛYÛÛˆ™YÜÛNÂˆ™YÜÛKœÚ[ÈHÙ]Ø™YÜÚ\JÙ™ÊNÂ‚ˆÛYÛÛœÈ^ÛYWÜÛ\ÈHÙ]Ø™YÙ^ÛYYØ\™XJÙ™ÊNÂˆ]]È\HY™ŠÈ™YÜÛHK^ÛYWÜÛ\ÊNÂˆYˆ
+]\™[\J
+JH™YÜÛHH\ÌNÂˆ™]\›ˆ™YÜÛNÂŸB˜›ÛÛ\×ÜÚÚ\
+ÛÛœÝ[˜[ZXÔš[ÛÛ™šYÉˆÙ™ÊBžÂˆ]]ÈÜÜÚÚ\ÚZYÚHÙ™Ë›Ü[ÛŠœÚÚ\ÚZYÚŠNÂˆ]]ÈÜÜÚÚ\ÛÛÜÈHÙ™Ë›Ü[ÛŠœÚÚ\ÛÛÜÈŠNÂˆ]]ÈÜÙ˜YÜÚY[HÙ™Ë›Ü[ÛŠ™˜YÜÚY[ŠNÂˆ™]\›ˆ
+ÜÜÚÚ\ÚZYÚ	‰ˆÜÜÚÚ\ÚZYÚO™Ù][
+
+Hˆ	‰ˆÜÜÚÚ\ÛÛÜÈ	‰ˆÜÜÚÚ\ÛÛÜËO™Ù][
+
+Hˆ
+Bˆ
+ÜÙ˜YÜÚY[	‰ˆÜÙ˜YÜÚY[O™Ù][
+
+HOHÑ\ØX›Y
+NÂŸB™›Ø]Ù]Ü™X[ÜÚÚ\Ù\Ý
+ÛÛœÝ[˜[ZXÔš[ÛÛ™šYÉˆÙ™ÊHÂˆ™]\›ˆ\×ÜÚÚ\
+Ù™ÊHÈÙ™Ë›ÜÙ›Ø]
+œÚÚ\Ù\Ý[˜ÙHŠHˆÂŸBœÝ]XÈ›ÛÛ\×ÖÜš[\ŠÛÛœÝÝŽœÝš[™Éˆš[\—Û›Ý\ÊBžÂˆ™]\›ˆ›ÛÜÝŽ˜[ÛÜš]NŽ˜ÛÛZ[œÊš[\—Û›Ý\Ë”’S•T—Õ‘S‘Ô—Ô•TÐLÑŠBˆ	‰ˆ›ÛÜÝŽ˜[ÛÜš]NŽ˜ÛÛZ[œÊš[\—Û›Ý\Ë”’S•T—ÓSÑSÖŠNÂŸB‚˜›ÛÛ\×ÖÜš[\ŠÛÛœÝ[˜[ZXÔš[ÛÛ™šYÈ	˜Ù™ÊBžÂˆ]]È
+œš[\—Û›Ý\ÈHÙ™Ë›ÜÛÛ™šYÓÜ[Û”Ýš[™ÏŠœš[\—Û›Ý\ÈŠNÂˆ™]\›ˆš[\—Û›Ý\È	‰ˆ\×ÖÜš[\Šš[\—Û›Ý\ËO˜[YJNÂŸB‚˜›ÛÛ\×ÖÜš[\ŠÛÛœÝš[ÛÛ™šYÈ	˜Ù™ÊBžÂˆ™]\›ˆ\×ÖÜš[\ŠÙ™Ëœš[\—Û›Ý\Ë˜[YJNÂŸBŸHËÈ˜[Y\ÜXÙHÛXÌÜ‚‚ˆÚ[˜ÛYHÙ\™X[Ý\\ËÜÛ[[ÜœXËš‚ÑT‘PSÔ‘QÒTÕT—ÕTJÛXÌÜŽŽ‘[˜[ZXÔš[ÛÛ™šYÊBÑT‘PSÔ‘QÒTÕT—ÔÓSSÔ”P×Ô‘SUSÓŠÛXÌÜŽŽ‘[˜[ZXÐÛÛ™šYËÛXÌÜŽŽ‘[˜[ZXÔš[ÛÛ™šYÊB

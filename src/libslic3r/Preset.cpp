@@ -968,7 +968,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control",
     "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
-    "filament_tower_ironing_area"
+    "filament_tower_ironing_area", "spoolman_url", "spoolman_filament_id"
     };
 
 static std::vector<std::string> s_Preset_machine_limits_options {

@@ -1175,6 +1175,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionStrings,             filament_type))
+    ((ConfigOptionStrings,             spoolman_url))
+    ((ConfigOptionStrings,             spoolman_filament_id))
     ((ConfigOptionBools,               filament_soluble))
     ((ConfigOptionBools,               filament_is_support))
     ((ConfigOptionFloats,              filament_cost))
