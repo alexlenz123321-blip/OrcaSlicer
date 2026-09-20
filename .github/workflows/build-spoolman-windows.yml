@@ -19,3 +19,5 @@ jobs:
       arch: x64
       build-deps-only: false
     secrets: inherit
+
+# Builds the crash-fixed Spoolman filament picker.
