@@ -3880,14 +3880,18 @@ void TabFilament::build()
         auto spoolman_group = page->new_optgroup(L("Spoolman profile link"), L"param_information");
         spoolman_group->append_single_option_line("spoolman_url");
 
-        auto select_spoolman_filament = [this, spoolman_group](wxWindow* parent) {
-            auto sizer = new wxBoxSizer(wxHORIZONTAL);
-            auto btn = new ScalableButton(parent, wxID_ANY, "search", _L("Select from Spoolman") + " " + dots,
-                                          wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);
-            btn->SetFont(wxGetApp().normal_font());
-            sizer->Add(btn);
+        spoolman_group->append_single_option_line("spoolman_filament_id");
 
-            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group](wxCommandEvent&) {
+        ConfigOptionsGroupWkp spoolman_group_wk(spoolman_group);
+        Line select_spoolman_line { "", "" };
+        select_spoolman_line.full_width = 1;
+        select_spoolman_line.widget = [this, spoolman_group_wk](wxWindow* parent) {
+            auto sizer = new wxBoxSizer(wxHORIZONTAL);
+            auto btn = new wxButton(parent, wxID_ANY, _L("Select from Spoolman") + " " + dots);
+            btn->SetFont(wxGetApp().normal_font());
+            sizer->Add(btn, 0, wxALIGN_LEFT);
+
+            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group_wk](wxCommandEvent&) {
                 const Preset& preset = m_presets->get_edited_preset();
                 const std::string url = preset.config.opt_string("spoolman_url", 0u);
                 if (url.empty()) {
@@ -3966,9 +3970,11 @@ void TabFilament::build()
                     const int choice = dialog.GetSelection();
                     if (choice == wxNOT_FOUND)
                         return;
-                    spoolman_group->set_value("spoolman_filament_id", entries[choice].second, true);
-                    if (Field* field = spoolman_group->get_field("spoolman_filament_id"))
-                        field->field_changed();
+                    if (auto group = spoolman_group_wk.lock(); group) {
+                        group->set_value("spoolman_filament_id", entries[choice].second, true);
+                        if (Field* field = group->get_field("spoolman_filament_id"))
+                            field->field_changed();
+                    }
                 } catch (const std::exception& e) {
                     MessageDialog(parent, wxString::Format(_L("Spoolman returned invalid filament data: %s"),
                                                            wxString::FromUTF8(e.what())),
@@ -3978,10 +3984,7 @@ void TabFilament::build()
             return sizer;
         };
 
-        Option spoolman_filament_option = spoolman_group->get_option("spoolman_filament_id");
-        Line spoolman_filament_line = spoolman_group->create_single_option_line(spoolman_filament_option);
-        spoolman_filament_line.append_widget(select_spoolman_filament);
-        spoolman_group->append_line(spoolman_filament_line);
+        spoolman_group->append_line(select_spoolman_line);
         spoolman_group->m_on_change = [this](t_config_option_key opt_key, boost::any value) {
             update_dirty();
             on_value_change(opt_key, value);
