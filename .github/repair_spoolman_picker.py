@@ -21,13 +21,16 @@ replace_once(
 )
 replace_once(
     '''            auto btn = new ScalableButton(parent, wxID_ANY, "search", _L("Select from Spoolman") + " " + dots,
-                                          wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);''',
-    '            auto btn = new wxButton(parent, wxID_ANY, _L("Select from Spoolman") + " " + dots);'
-)
-replace_once('            sizer->Add(btn);', '            sizer->Add(btn, 0, wxALIGN_LEFT);')
-replace_once(
-    '            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group](wxCommandEvent&) {',
-    '            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group_wk](wxCommandEvent&) {'
+                                          wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);
+            btn->SetFont(wxGetApp().normal_font());
+            sizer->Add(btn);
+
+            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group](wxCommandEvent&) {''',
+    '''            auto btn = new wxButton(parent, wxID_ANY, _L("Select from Spoolman") + " " + dots);
+            btn->SetFont(wxGetApp().normal_font());
+            sizer->Add(btn, 0, wxALIGN_LEFT);
+
+            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group_wk](wxCommandEvent&) {'''
 )
 replace_once(
     '''                    spoolman_group->set_value("spoolman_filament_id", entries[choice].second, true);
