@@ -1,0 +1,42 @@
+name: Repair Plater source encoding
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spoolman-profile-link
+    paths:
+      - .github/workflows/repair-plater-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: spoolman-profile-link
+          fetch-depth: 0
+
+      - name: Restore clean source and apply Spoolman patch
+        shell: bash
+        run: |
+          git checkout 939fcea0fbfd67736f085ff29b9c9fe6a7374612 -- src/slic3r/GUI/Plater.cpp
+          git apply .github/patches/spoolman-plater.patch
+          python3 -c "from pathlib import Path; Path('src/slic3r/GUI/Plater.cpp').read_text(encoding='utf-8')"
+
+      - name: Commit repaired source
+        shell: bash
+        run: |
+          if git diff --quiet -- src/slic3r/GUI/Plater.cpp; then
+            echo "Plater.cpp is already repaired."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/slic3r/GUI/Plater.cpp
+          git commit -m "Repair Plater.cpp encoding"
+          git push origin HEAD:spoolman-profile-link
