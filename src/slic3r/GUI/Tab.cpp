@@ -257,7 +257,8 @@ static void sync_filament_profile_to_spoolman(wxWindow* parent, const Preset& pr
 
         std::string field_error;
         if (!ensure_spoolman_filament_field(api, "orca_profile", "Snapmaker Orca profile", field_error) ||
-            !ensure_spoolman_filament_field(api, "variant", "Variant", field_error)) {
+            !ensure_spoolman_filament_field(api, "variant", "Variant", field_error) ||
+            !ensure_spoolman_filament_field(api, "filament_id", "Filament-ID", field_error)) {
             MessageDialog(parent, wxString::FromUTF8(field_error), _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
             return;
         }
@@ -267,6 +268,7 @@ static void sync_filament_profile_to_spoolman(wxWindow* parent, const Preset& pr
             extra = data["extra"];
         extra["orca_profile"] = nlohmann::json(preset.name).dump();
         extra["variant"] = nlohmann::json(variant).dump();
+        extra["filament_id"] = nlohmann::json(filament_id).dump();
         const auto updated = spoolman_request("PATCH", api + "/filament/" + filament_id,
                                               nlohmann::json{{"extra", extra}}.dump());
         if (updated.status != 200) {
