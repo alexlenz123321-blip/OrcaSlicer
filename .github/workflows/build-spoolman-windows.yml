@@ -20,4 +20,4 @@ jobs:
       build-deps-only: false
     secrets: inherit
 
-# Builds the crash-fixed Spoolman filament picker.
+# Build source repair 3a512322: remove picker and resolve linked filament profiles.
