@@ -2456,7 +2456,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("spoolman_filament_id", coStrings);
     def->label = L("Spoolman filament ID (optional)");
-    def->tooltip = L("When set, saving this profile permanently links it to the matching Spoolman filament. Leave empty to use automatic name matching.");
+    def->tooltip = L("Select a filament from Spoolman or enter its ID manually. Saving this profile permanently links it to that filament. Leave empty to use automatic name matching.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionStrings{""});
     def->cli = ConfigOptionDef::nocli;
