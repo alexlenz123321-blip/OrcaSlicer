@@ -32,3 +32,4 @@ jobs:
           git diff --cached --check
           git commit -m "Fix crash when opening filament editor"
           git push origin HEAD:spoolman-profile-link
+
