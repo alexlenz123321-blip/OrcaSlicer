@@ -1,0 +1,136 @@
+diff --git a/src/slic3r/GUI/Tab.cpp b/src/slic3r/GUI/Tab.cpp
+--- a/src/slic3r/GUI/Tab.cpp
++++ b/src/slic3r/GUI/Tab.cpp
+@@ -23,4 +23,5 @@
+ #include <wx/imaglist.h>
+ #include <wx/settings.h>
+ #include <wx/filedlg.h>
++#include <wx/choicdlg.h>
+ #include <iomanip>
+@@ -3878,5 +3879,111 @@ void TabFilament::build()
+         optgroup->append_single_option_line("filament_cost");
+-        auto spoolman_group = page->new_optgroup(L("Spoolman profile link"), L"param_information");
+-        spoolman_group->append_single_option_line("spoolman_url");
+-        spoolman_group->append_single_option_line("spoolman_filament_id");
++        auto spoolman_group = page->new_optgroup(L("Spoolman profile link"), L"param_information");
++        spoolman_group->append_single_option_line("spoolman_url");
++
++        auto select_spoolman_filament = [this, spoolman_group](wxWindow* parent) {
++            auto sizer = new wxBoxSizer(wxHORIZONTAL);
++            auto btn = new ScalableButton(parent, wxID_ANY, "search", _L("Select from Spoolman") + " " + dots,
++                                          wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT, true);
++            btn->SetFont(wxGetApp().normal_font());
++            sizer->Add(btn);
++
++            btn->Bind(wxEVT_BUTTON, [this, parent, spoolman_group](wxCommandEvent&) {
++                const Preset& preset = m_presets->get_edited_preset();
++                const std::string url = preset.config.opt_string("spoolman_url", 0u);
++                if (url.empty()) {
++                    MessageDialog(parent, _L("Enter the Spoolman URL first."),
++                                  _L("Spoolman profile link"), wxOK | wxICON_INFORMATION).ShowModal();
++                    return;
++                }
++
++                const auto response = spoolman_request("GET", spoolman_api_base(url) + "/filament");
++                if (response.status != 200) {
++                    MessageDialog(parent,
++                                  wxString::Format(_L("Could not load the filament list from Spoolman (HTTP %u)."), response.status),
++                                  _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++                    return;
++                }
++
++                try {
++                    const nlohmann::json filaments = nlohmann::json::parse(response.body);
++                    if (!filaments.is_array())
++                        throw std::runtime_error("The filament response is not a list.");
++
++                    std::vector<std::pair<wxString, std::string>> entries;
++                    entries.reserve(filaments.size());
++                    for (const auto& filament : filaments) {
++                        if (!filament.contains("id") || !filament["id"].is_number_integer())
++                            continue;
++
++                        const std::string id = std::to_string(filament["id"].get<int>());
++                        const auto read_text = [&filament](const char* key) {
++                            return filament.contains(key) && filament[key].is_string()
++                                ? filament[key].get<std::string>() : std::string();
++                        };
++                        std::string vendor;
++                        if (filament.contains("vendor") && filament["vendor"].is_object()) {
++                            const auto& vendor_data = filament["vendor"];
++                            if (vendor_data.contains("name") && vendor_data["name"].is_string())
++                                vendor = vendor_data["name"].get<std::string>();
++                        }
++                        const std::string material = read_text("material");
++                        const std::string name = read_text("name");
++
++                        std::string description = "ID " + id + " | ";
++                        if (!vendor.empty())
++                            description += vendor + " ";
++                        if (!material.empty())
++                            description += material + " ";
++                        description += name.empty() ? std::string("(unnamed)") : name;
++                        entries.emplace_back(wxString::FromUTF8(description), id);
++                    }
++
++                    std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
++                        return left.first.CmpNoCase(right.first) < 0;
++                    });
++                    if (entries.empty()) {
++                        MessageDialog(parent, _L("No filaments were found in Spoolman."),
++                                      _L("Spoolman profile link"), wxOK | wxICON_INFORMATION).ShowModal();
++                        return;
++                    }
++
++                    wxArrayString choices;
++                    int selected = wxNOT_FOUND;
++                    const std::string current_id = preset.config.opt_string("spoolman_filament_id", 0u);
++                    for (size_t i = 0; i < entries.size(); ++i) {
++                        choices.Add(entries[i].first);
++                        if (entries[i].second == current_id)
++                            selected = static_cast<int>(i);
++                    }
++
++                    wxSingleChoiceDialog dialog(parent, _L("Select the filament for this profile."),
++                                                _L("Spoolman filament"), choices);
++                    if (selected != wxNOT_FOUND)
++                        dialog.SetSelection(selected);
++                    if (dialog.ShowModal() != wxID_OK)
++                        return;
++
++                    const int choice = dialog.GetSelection();
++                    if (choice == wxNOT_FOUND)
++                        return;
++                    spoolman_group->set_value("spoolman_filament_id", entries[choice].second, true);
++                    if (Field* field = spoolman_group->get_field("spoolman_filament_id"))
++                        field->field_changed();
++                } catch (const std::exception& e) {
++                    MessageDialog(parent, wxString::Format(_L("Spoolman returned invalid filament data: %s"),
++                                                           wxString::FromUTF8(e.what())),
++                                  _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++                }
++            });
++            return sizer;
++        };
++
++        Option spoolman_filament_option = spoolman_group->get_option("spoolman_filament_id");
++        Line spoolman_filament_line = spoolman_group->create_single_option_line(spoolman_filament_option);
++        spoolman_filament_line.append_widget(select_spoolman_filament);
++        spoolman_group->append_line(spoolman_filament_line);
++        spoolman_group->m_on_change = [this](t_config_option_key opt_key, boost::any value) {
++            update_dirty();
++            on_value_change(opt_key, value);
++        };
+         //BBS
+diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
+--- a/src/libslic3r/PrintConfig.cpp
++++ b/src/libslic3r/PrintConfig.cpp
+@@ -2456,7 +2456,7 @@ void PrintConfigDef::init_fff_params()
+ 
+     def = this->add("spoolman_filament_id", coStrings);
+     def->label = L("Spoolman filament ID (optional)");
+-    def->tooltip = L("When set, saving this profile permanently links it to the matching Spoolman filament. Leave empty to use automatic name matching.");
++    def->tooltip = L("Select a filament from Spoolman or enter its ID manually. Saving this profile permanently links it to that filament. Leave empty to use automatic name matching.");
+     def->mode = comSimple;
+     def->set_default_value(new ConfigOptionStrings{""});
+     def->cli = ConfigOptionDef::nocli;
