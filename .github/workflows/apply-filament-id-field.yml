@@ -1,0 +1,38 @@
+name: Apply Spoolman filament ID field
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spoolman-profile-link
+    paths:
+      - .github/workflows/apply-filament-id-field.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: spoolman-profile-link
+          fetch-depth: 0
+
+      - name: Apply filament ID field patch
+        shell: bash
+        run: |
+          git apply .github/patches/spoolman-filament-id-field.patch
+          git diff --check
+          python3 -c "from pathlib import Path; Path('src/slic3r/GUI/Tab.cpp').read_text(encoding='utf-8')"
+
+      - name: Commit field integration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/slic3r/GUI/Tab.cpp
+          git commit -m "Show filament ID in Spoolman extra fields"
+          git push origin HEAD:spoolman-profile-link
