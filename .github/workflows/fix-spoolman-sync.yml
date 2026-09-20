@@ -2,6 +2,11 @@ name: Apply Spoolman stability and sync fix
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - spoolman-profile-link
+    paths:
+      - .github/workflows/fix-spoolman-sync.yml
 
 permissions:
   contents: write
