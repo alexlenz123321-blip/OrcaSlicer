@@ -1626,6 +1626,11 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                     machineData.index = static_cast<int>(i);
                     machineData.filament_info = name;
 
+                    json::const_iterator spoolIdsIt = j_value.find("filament_spool_id");
+                    if (spoolIdsIt != j_value.end() && spoolIdsIt->is_array() && spoolIdsIt->size() > i &&
+                        (*spoolIdsIt)[i].is_number_integer())
+                        machineData.spool_id = (*spoolIdsIt)[i].get<int>();
+
                     json::const_iterator multiColorIt = j_value.find("filament_color_multi");
                     if (multiColorIt != j_value.end() && multiColorIt->is_array() && multiColorIt->size() > i &&
                         (*multiColorIt)[i].is_object())
@@ -7970,5 +7975,4 @@ void SSWCP::send_message_auto(const std::string& message, wxWebView* webview)
 }
 
 }}; // namespace Slic3r::GUI
-
 
