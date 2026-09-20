@@ -1,0 +1,31 @@
+name: Apply Spoolman stability and sync fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spoolman-profile-link
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Apply source fix
+        run: python .github/fix_spoolman_sync.py
+      - name: Verify and commit
+        shell: bash
+        run: |
+          git diff --check
+          git diff -- src/slic3r/GUI/Tab.cpp src/slic3r/GUI/Plater.cpp
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/fix_spoolman_sync.py .github/workflows/fix-spoolman-sync.yml
+          git add src/slic3r/GUI/Tab.cpp src/slic3r/GUI/Plater.cpp
+          git commit -m "Fix Spoolman editor crash and filament sync"
+          git push origin HEAD:spoolman-profile-link
