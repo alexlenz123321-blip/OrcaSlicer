@@ -1,0 +1,556 @@
+diff --git a/src/libslic3r/Preset.cpp b/src/libslic3r/Preset.cpp
+index 53f1f4579..d0d09b9f4 100644
+--- a/src/libslic3r/Preset.cpp
++++ b/src/libslic3r/Preset.cpp
+@@ -1025,7 +1025,7 @@ static std::vector<std::string> s_Preset_filament_options {
+     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control",
+     "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
+     "filament_tower_ironing_area",
+-    "filament_flow_support"
++    "filament_flow_support", "spoolman_url", "spoolman_filament_id"
+     };
+ 
+ static std::vector<std::string> s_Preset_machine_limits_options {
+diff --git a/src/libslic3r/PresetBundle.hpp b/src/libslic3r/PresetBundle.hpp
+index 83860bca6..08c27f5ed 100644
+--- a/src/libslic3r/PresetBundle.hpp
++++ b/src/libslic3r/PresetBundle.hpp
+@@ -40,6 +40,7 @@ struct ConnectMachineInfo
+     std::vector<std::string> multiColors;
+     Slic3r::FilamentColorMode colorMode { Slic3r::FilamentColorMode::Segment };
+     int index {0};
++    int spool_id {0};
+ };
+ 
+ namespace Slic3r {
+diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
+index 794761e80..312fa840e 100644
+--- a/src/libslic3r/PrintConfig.cpp
++++ b/src/libslic3r/PrintConfig.cpp
+@@ -2455,6 +2455,20 @@ void PrintConfigDef::init_fff_params()
+     def->set_default_value(new ConfigOptionStrings{L("(Undefined)")});
+     def->cli = ConfigOptionDef::nocli;
+ 
++    def = this->add("spoolman_url", coStrings);
++    def->label = L("Spoolman URL");
++    def->tooltip = L("Address of the Spoolman server used to link this filament profile.");
++    def->mode = comSimple;
++    def->set_default_value(new ConfigOptionStrings{"http://192.168.178.81:7912"});
++    def->cli = ConfigOptionDef::nocli;
++
++    def = this->add("spoolman_filament_id", coStrings);
++    def->label = L("Spoolman filament ID (optional)");
++    def->tooltip = L("Select a filament from Spoolman or enter its ID manually. Saving this profile permanently links it to that filament. Leave empty to use automatic name matching.");
++    def->mode = comSimple;
++    def->set_default_value(new ConfigOptionStrings{""});
++    def->cli = ConfigOptionDef::nocli;
++
+     def = this->add("infill_direction", coFloat);
+     def->label = L("Sparse infill direction");
+     def->category = L("Strength");
+diff --git a/src/libslic3r/PrintConfig.hpp b/src/libslic3r/PrintConfig.hpp
+index 889a56b51..1980b4cee 100644
+--- a/src/libslic3r/PrintConfig.hpp
++++ b/src/libslic3r/PrintConfig.hpp
+@@ -1228,6 +1228,8 @@ PRINT_CONFIG_CLASS_DEFINE(
+     ((ConfigOptionFloats,              filament_diameter))
+     ((ConfigOptionFloats,              filament_density))
+     ((ConfigOptionStrings,             filament_type))
++    ((ConfigOptionStrings,             spoolman_url))
++    ((ConfigOptionStrings,             spoolman_filament_id))
+     ((ConfigOptionBools,               filament_soluble))
+     ((ConfigOptionBools,               filament_is_support))
+     ((ConfigOptionFloats,              filament_cost))
+diff --git a/src/libslic3r/libslic3r.h b/src/libslic3r/libslic3r.h
+index bc542bc6c..f3b8a756d 100644
+--- a/src/libslic3r/libslic3r.h
++++ b/src/libslic3r/libslic3r.h
+@@ -2,7 +2,7 @@
+ #define _libslic3r_h_
+ 
+ #include "common_func/common_func.hpp"
+-#define SLIC3R_APP_FULL_NAME "Snapmaker Orca"
++#define SLIC3R_APP_FULL_NAME "Snapmaker Orca Spoolman Edition"
+ #define GCODEVIEWER_APP_NAME "Snapmaker_Orca G-code Viewer"
+ #define GCODEVIEWER_APP_KEY  "Snapmaker_OrcaGcodeViewer"
+ #define GCODEVIEWER_BUILD_ID std::string("Snapmaker_Orca G-code Viewer-") + std::string(SLIC3R_VERSION) + std::string("-RC")
+diff --git a/src/slic3r/GUI/Plater.cpp b/src/slic3r/GUI/Plater.cpp
+index 4a3f68b8f..214096c17 100644
+--- a/src/slic3r/GUI/Plater.cpp
++++ b/src/slic3r/GUI/Plater.cpp
+@@ -90,6 +90,8 @@
+ #include "libslic3r/Model.hpp"
+ #include "libslic3r/SLA/Hollowing.hpp"
+ #include "libslic3r/SLA/SupportPoint.hpp"
++#include "slic3r/Utils/Http.hpp"
++#include <nlohmann/json.hpp>
+ #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
+ #include "libslic3r/Polygon.hpp"
+ #include "libslic3r/Print.hpp"
+@@ -678,21 +680,189 @@ std::string extract_base_filament_name(const std::string& full_name)
+ // Resolve a machine filament name to a matching local filament preset.
+ // Filament presets follow the convention "BaseName @Model nozzle",
+ // e.g. "Generic PA-CF @U1 0.4 nozzle".  Split by '@' to extract the
+-// base name, trim, and compare exactly — so "Generic PA" does NOT
++// base name, trim, and compare exactly - so "Generic PA" does NOT
+ // accidentally match "Generic PA-CF".
+-Preset* resolve_filament_preset(PresetBundle* preset_bundle, 
+-    const std::string& filament_name, const std::string& filament_type)
++Preset* resolve_filament_preset(PresetBundle* preset_bundle,
++    const std::string& filament_name, const std::string& filament_type,
++    const std::string& filament_color, int spool_id)
+ {
+     if (!preset_bundle || filament_name.empty())
+         return nullptr;
+ 
++    // paxx exposes the Spoolman spool ID as part of print_task_config. Prefer
++    // the explicit Orca profile stored on that spool's filament over name
++    // matching, which may otherwise fall back to a Generic profile.
++    if (spool_id > 0) {
++        std::string spoolman_url;
++        const Preset& selected = preset_bundle->filaments.get_edited_preset();
++        if (selected.config.has("spoolman_url"))
++            spoolman_url = selected.config.opt_string("spoolman_url", 0u);
++        if (spoolman_url.empty()) {
++            for (const Preset& preset : preset_bundle->filaments) {
++                if (preset.config.has("spoolman_url")) {
++                    spoolman_url = preset.config.opt_string("spoolman_url", 0u);
++                    if (!spoolman_url.empty())
++                        break;
++                }
++            }
++        }
++        while (!spoolman_url.empty() && spoolman_url.back() == '/')
++            spoolman_url.pop_back();
++
++        if (!spoolman_url.empty()) {
++            std::string response;
++            std::string request_error;
++            unsigned status = 0;
++            auto http = Http::get(spoolman_url + "/api/v1/spool/" + std::to_string(spool_id));
++            http.timeout_connect(3)
++                .timeout_max(8)
++                .on_complete([&](std::string body, unsigned http_status) {
++                    response = std::move(body);
++                    status = http_status;
++                })
++                .on_error([&](std::string body, std::string error, unsigned http_status) {
++                    response = std::move(body);
++                    request_error = std::move(error);
++                    status = http_status;
++                })
++                .perform_sync();
++
++            if (status == 200) {
++                try {
++                    const nlohmann::json spool = nlohmann::json::parse(response);
++                    const nlohmann::json& filament = spool.at("filament");
++                    const nlohmann::json& extra = filament.at("extra");
++                    if (extra.contains("orca_profile") && extra["orca_profile"].is_string()) {
++                        std::string profile_name = extra["orca_profile"].get<std::string>();
++                        try {
++                            const nlohmann::json decoded = nlohmann::json::parse(profile_name);
++                            if (decoded.is_string())
++                                profile_name = decoded.get<std::string>();
++                        } catch (...) {
++                            // Older/manual entries may already contain plain text.
++                        }
++                        if (Preset* preset = preset_bundle->filaments.find_preset(profile_name, false, true)) {
++                            if (preset->is_compatible) {
++                                BOOST_LOG_TRIVIAL(info) << "Spoolman profile resolved: spool=" << spool_id
++                                                        << " profile=" << profile_name;
++                                return preset;
++                            }
++                            BOOST_LOG_TRIVIAL(warning) << "Spoolman profile is not compatible with current printer: "
++                                                       << profile_name;
++                        } else {
++                            BOOST_LOG_TRIVIAL(warning) << "Spoolman profile is not installed in Orca: " << profile_name;
++                        }
++                    }
++                } catch (const std::exception& e) {
++                    BOOST_LOG_TRIVIAL(warning) << "Invalid Spoolman response for spool " << spool_id << ": " << e.what();
++                }
++            } else {
++                BOOST_LOG_TRIVIAL(warning) << "Could not load Spoolman spool " << spool_id
++                                           << " (HTTP " << status << "): " << request_error;
++            }
++        }
++    }
++
++
++    // The U1 does not always expose a Spoolman spool ID. Resolve the
++    // filament by material and colour and use the permanent filament ID
++    // stored in the local Orca profile instead.
++    std::string spoolman_url;
++    for (const Preset& preset : preset_bundle->filaments) {
++        if (!preset.config.has("spoolman_url"))
++            continue;
++        spoolman_url = preset.config.opt_string("spoolman_url", 0u);
++        if (!spoolman_url.empty())
++            break;
++    }
++    while (!spoolman_url.empty() && spoolman_url.back() == '/')
++        spoolman_url.pop_back();
++
++    if (!spoolman_url.empty() && !filament_type.empty() && !filament_color.empty()) {
++        std::string response;
++        std::string request_error;
++        unsigned status = 0;
++        auto http = Http::get(spoolman_url + "/api/v1/filament");
++        http.timeout_connect(3)
++            .timeout_max(8)
++            .on_complete([&](std::string body, unsigned http_status) {
++                response = std::move(body);
++                status = http_status;
++            })
++            .on_error([&](std::string body, std::string error, unsigned http_status) {
++                response = std::move(body);
++                request_error = std::move(error);
++                status = http_status;
++            })
++            .perform_sync();
++
++        if (status == 200) {
++            try {
++                const nlohmann::json filaments = nlohmann::json::parse(response);
++                if (filaments.is_array()) {
++                    auto normalized = [](std::string value) {
++                        std::transform(value.begin(), value.end(), value.begin(),
++                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++                        if (!value.empty() && value.front() == '#')
++                            value.erase(value.begin());
++                        if (value.size() == 8)
++                            value.resize(6);
++                        return value;
++                    };
++                    const std::string wanted_type  = normalized(filament_type);
++                    const std::string wanted_color = normalized(filament_color);
++                    const std::string machine_name = normalized(filament_name);
++
++                    for (Preset& preset : preset_bundle->filaments) {
++                        if (!preset.is_compatible || !preset.config.has("spoolman_filament_id"))
++                            continue;
++                        const std::string configured_id = preset.config.opt_string("spoolman_filament_id", 0u);
++                        if (configured_id.empty())
++                            continue;
++
++                        for (const nlohmann::json& filament : filaments) {
++                            if (!filament.contains("id") || !filament["id"].is_number_integer() ||
++                                std::to_string(filament["id"].get<int>()) != configured_id)
++                                continue;
++
++                            const auto text = [&filament](const char* key) {
++                                return filament.contains(key) && filament[key].is_string()
++                                           ? filament[key].get<std::string>() : std::string();
++                            };
++                            const std::string material = normalized(text("material"));
++                            const std::string color    = normalized(text("color_hex"));
++                            if (material != wanted_type || color != wanted_color)
++                                continue;
++
++                            std::string vendor;
++                            if (filament.contains("vendor") && filament["vendor"].is_object() &&
++                                filament["vendor"].contains("name") && filament["vendor"]["name"].is_string())
++                                vendor = normalized(filament["vendor"]["name"].get<std::string>());
++                            if (!vendor.empty() && machine_name.find(vendor) == std::string::npos)
++                                continue;
++
++                            BOOST_LOG_TRIVIAL(info) << "Spoolman profile resolved by material/color: filament="
++                                                    << configured_id << " profile=" << preset.name;
++                            return &preset;
++                        }
++                    }
++                }
++            } catch (const std::exception& e) {
++                BOOST_LOG_TRIVIAL(warning) << "Invalid Spoolman filament list: " << e.what();
++            }
++        } else {
++            BOOST_LOG_TRIVIAL(warning) << "Could not load Spoolman filaments (HTTP " << status
++                                       << "): " << request_error;
++        }
++    }
++
+     auto to_lower = [](std::string s) {
+         std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+         return s;
+     };
+ 
+     for (auto& preset : preset_bundle->filaments) {
+-        if (!preset.is_compatible || !preset.is_system)
++        if (!preset.is_compatible)
+             continue;
+ 
+         std::string base = extract_base_filament_name(preset.name);
+@@ -778,6 +948,7 @@ void build_machine_filament_list(PresetBundle* preset_bundle, std::vector<Filame
+         fd.m_index = info.index;
+         fd.m_name  = info.filament_info;
+         fd.m_type  = info.filament_type;
++        fd.m_spool_id = info.spool_id;
+         
+         if (!info.color_info.empty() || !info.multiColors.empty()) {
+             fd.m_color = FilamentColor::FromColors(info.multiColors, info.colorMode, info.color_info);
+@@ -9351,7 +9522,10 @@ void Sidebar::show_sync_filament_dialog()
+         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
+ 
+         for (size_t i = 0; i < effective_size; ++i) {
+-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type);
++            const wxColour synced_color = getMainColor(syncedData[i].m_color);
++            Preset* matched = resolve_filament_preset(
++                preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
++                into_u8(synced_color.GetAsString(wxC2S_HTML_SYNTAX)), syncedData[i].m_spool_id);
+             if (matched) {
+                 preset_bundle->set_filament_preset(i, matched->name);
+             }
+@@ -24695,5 +24869,3 @@ SuppressBackgroundProcessingUpdate::~SuppressBackgroundProcessingUpdate()
+ }
+ 
+ }}    // namespace Slic3r::GUI
+-
+-
+diff --git a/src/slic3r/GUI/SSWCP.cpp b/src/slic3r/GUI/SSWCP.cpp
+index 71d44f977..9a9c8e642 100644
+--- a/src/slic3r/GUI/SSWCP.cpp
++++ b/src/slic3r/GUI/SSWCP.cpp
+@@ -1714,6 +1714,11 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
+                     machineData.index = static_cast<int>(i);
+                     machineData.filament_info = name;
+ 
++                    json::const_iterator spoolIdsIt = j_value.find("filament_spool_id");
++                    if (spoolIdsIt != j_value.end() && spoolIdsIt->is_array() && spoolIdsIt->size() > i &&
++                        (*spoolIdsIt)[i].is_number_integer())
++                        machineData.spool_id = (*spoolIdsIt)[i].get<int>();
++
+                     json::const_iterator multiColorIt = j_value.find("filament_color_multi");
+                     if (multiColorIt != j_value.end() && multiColorIt->is_array() && multiColorIt->size() > i &&
+                         (*multiColorIt)[i].is_object())
+@@ -8366,4 +8371,3 @@ void SSWCP::send_message_auto(const std::string& message, wxWebView* webview)
+ 
+ }}; // namespace Slic3r::GUI
+ 
+-
+diff --git a/src/slic3r/GUI/Tab.cpp b/src/slic3r/GUI/Tab.cpp
+index 7ed342fba..45ecbfcab 100644
+--- a/src/slic3r/GUI/Tab.cpp
++++ b/src/slic3r/GUI/Tab.cpp
+@@ -25,12 +25,15 @@
+ #include <wx/imaglist.h>
+ #include <wx/settings.h>
+ #include <wx/filedlg.h>
++#include <wx/choicdlg.h>
+ #include <iomanip>
+ #include <sstream>
++#include <cctype>
+ 
+ #include <boost/algorithm/string/predicate.hpp>
+ #include <boost/algorithm/string/join.hpp>
+ #include <boost/algorithm/string/replace.hpp>
++#include <boost/algorithm/string/trim.hpp>
+ #include "libslic3r/libslic3r.h"
+ #include "slic3r/GUI/OptionsGroup.hpp"
+ #include "wxExtensions.hpp"
+@@ -55,6 +58,8 @@
+ #include "BedShapeDialog.hpp"
+ #include "libslic3r/GCode/Thumbnails.hpp"
+ #include "NotificationManager.hpp"
++#include "slic3r/Utils/Http.hpp"
++#include <nlohmann/json.hpp>
+ 
+ #include "BedShapeDialog.hpp"
+ // #include "BonjourDialog.hpp"
+@@ -132,6 +137,158 @@ static void validate_filament_hot_bed_nozzle_relation(wxWindow* parent)
+     }
+ }
+ 
++namespace {
++
++struct SpoolmanHttpResult {
++    std::string body;
++    std::string error;
++    unsigned    status { 0 };
++};
++
++static std::string spoolman_api_base(std::string url)
++{
++    while (!url.empty() && url.back() == '/')
++        url.pop_back();
++    return url + "/api/v1";
++}
++
++static SpoolmanHttpResult spoolman_request(const std::string& method, const std::string& url,
++                                           const std::string& body = {})
++{
++    SpoolmanHttpResult result;
++    auto configure = [&result, &body](Http& http) {
++        http.timeout_connect(3)
++            .timeout_max(8)
++            .header("Content-Type", "application/json")
++            .on_complete([&result](std::string response, unsigned status) {
++                result.body = std::move(response);
++                result.status = status;
++            })
++            .on_error([&result](std::string response, std::string error, unsigned status) {
++                result.body = std::move(response);
++                result.error = std::move(error);
++                result.status = status;
++            });
++        if (!body.empty())
++            http.set_post_body(body);
++        http.perform_sync();
++    };
++
++    if (method == "GET") {
++        auto http = Http::get(url);
++        configure(http);
++    } else if (method == "POST") {
++        auto http = Http::post(url);
++        configure(http);
++    } else {
++        auto http = Http::patch(url);
++        configure(http);
++    }
++    return result;
++}
++
++static bool ensure_spoolman_filament_field(const std::string& api, const std::string& key,
++                                           const std::string& name, std::string& error)
++{
++    const auto fields = spoolman_request("GET", api + "/field/filament");
++    if (fields.status != 200) {
++        error = "Could not read Spoolman filament fields (HTTP " + std::to_string(fields.status) + ").";
++        return false;
++    }
++
++    try {
++        for (const auto& field : nlohmann::json::parse(fields.body)) {
++            if (field.value("key", std::string()) == key)
++                return true;
++        }
++    } catch (const std::exception& e) {
++        error = std::string("Invalid response from Spoolman: ") + e.what();
++        return false;
++    }
++
++    nlohmann::json payload = {
++        {"name", name}, {"field_type", "text"}, {"order", 10}, {"default_value", "\"\""}
++    };
++    const auto created = spoolman_request("POST", api + "/field/filament/" + key, payload.dump());
++    if (created.status != 200 && created.status != 201 && created.status != 409) {
++        error = "Could not create Spoolman field '" + key + "' (HTTP " + std::to_string(created.status) + ").";
++        return false;
++    }
++    return true;
++}
++
++static void sync_filament_profile_to_spoolman(wxWindow* parent, const Preset& preset)
++{
++    const std::string url = preset.config.opt_string("spoolman_url", 0u);
++    const std::string filament_id = preset.config.opt_string("spoolman_filament_id", 0u);
++    if (url.empty() || filament_id.empty())
++        return;
++    if (!std::all_of(filament_id.begin(), filament_id.end(), [](unsigned char c) { return std::isdigit(c); })) {
++        MessageDialog(parent, _L("The Spoolman filament ID must contain digits only. The Orca profile was saved locally, but the Spoolman link was not changed."),
++                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++        return;
++    }
++
++    const std::string api = spoolman_api_base(url);
++    const auto filament = spoolman_request("GET", api + "/filament/" + filament_id);
++    if (filament.status != 200) {
++        MessageDialog(parent, wxString::Format(_L("Spoolman filament %s could not be loaded (HTTP %u). The Orca profile was saved locally."), wxString::FromUTF8(filament_id), filament.status),
++                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++        return;
++    }
++
++    try {
++        nlohmann::json data = nlohmann::json::parse(filament.body);
++        const std::string vendor = data.contains("vendor") && data["vendor"].is_object()
++            ? data["vendor"].value("name", std::string("Generic")) : std::string("Generic");
++        const std::string material = data.value("material", std::string());
++        std::string base_name = preset.name.substr(0, preset.name.find('@'));
++        boost::algorithm::trim(base_name);
++        const std::string prefix = vendor + " " + material;
++        if (!boost::algorithm::istarts_with(base_name, prefix)) {
++            MessageDialog(parent, wxString::Format(_L("The profile name must start with '%s' to link it to this Spoolman filament. The Orca profile was saved locally."), wxString::FromUTF8(prefix)),
++                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++            return;
++        }
++        std::string variant = base_name.substr(prefix.size());
++        boost::algorithm::trim(variant);
++        if (variant.empty()) {
++            MessageDialog(parent, _L("The profile name needs a variant after vendor and material, for example 'Basic Black'. The Orca profile was saved locally."),
++                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++            return;
++        }
++
++        std::string field_error;
++        if (!ensure_spoolman_filament_field(api, "orca_profile", "Snapmaker Orca profile", field_error) ||
++            !ensure_spoolman_filament_field(api, "variant", "Variant", field_error) ||
++            !ensure_spoolman_filament_field(api, "filament_id", "Filament-ID", field_error)) {
++            MessageDialog(parent, wxString::FromUTF8(field_error), _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++            return;
++        }
++
++        nlohmann::json extra = nlohmann::json::object();
++        if (data.contains("extra") && data["extra"].is_object())
++            extra = data["extra"];
++        extra["orca_profile"] = nlohmann::json(preset.name).dump();
++        extra["variant"] = nlohmann::json(variant).dump();
++        extra["filament_id"] = nlohmann::json(filament_id).dump();
++        const auto updated = spoolman_request("PATCH", api + "/filament/" + filament_id,
++                                              nlohmann::json{{"extra", extra}}.dump());
++        if (updated.status != 200) {
++            MessageDialog(parent, wxString::Format(_L("Spoolman rejected the profile link (HTTP %u). The Orca profile was saved locally."), updated.status),
++                          _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++            return;
++        }
++        BOOST_LOG_TRIVIAL(info) << "Spoolman profile link saved: filament=" << filament_id
++                                << " profile=" << preset.name;
++    } catch (const std::exception& e) {
++        MessageDialog(parent, wxString::Format(_L("Spoolman returned invalid data: %s. The Orca profile was saved locally."), wxString::FromUTF8(e.what())),
++                      _L("Spoolman profile link"), wxOK | wxICON_WARNING).ShowModal();
++    }
++}
++
++} // namespace
++
+ void Tab::Highlighter::set_timer_owner(wxEvtHandler* owner, int timerid/* = wxID_ANY*/)
+ {
+     m_timer.SetOwner(owner, timerid);
+@@ -4001,6 +4158,15 @@ void TabFilament::build()
+         optgroup->append_single_option_line("filament_shrink");
+         optgroup->append_single_option_line("filament_shrinkage_compensation_z");
+         optgroup->append_single_option_line("filament_cost");
++        auto spoolman_group = page->new_optgroup(L("Spoolman profile link"), L"param_information");
++        spoolman_group->append_single_option_line("spoolman_url");
++
++        spoolman_group->append_single_option_line("spoolman_filament_id");
++
++        spoolman_group->m_on_change = [this](t_config_option_key opt_key, boost::any value) {
++            update_dirty();
++            on_value_change(opt_key, value);
++        };
+         //BBS
+         optgroup->append_single_option_line("temperature_vitrification");
+         // filament_is_high_temperature is controlled by preset data, not user-facing
+@@ -6549,6 +6715,9 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
+     }
+     new_preset->save_info();
+ 
++    if (m_type == Preset::TYPE_FILAMENT)
++        sync_filament_profile_to_spoolman(m_parent, *new_preset);
++
+     // Mark the print & filament enabled if they are compatible with the currently selected preset.
+     // If saving the preset changes compatibility with other presets, keep the now incompatible dependent presets selected, however with a "red flag" icon showing that they are no more compatible.
+     m_preset_bundle->update_compatible(PresetSelectCompatibleType::Never);
+diff --git a/src/slic3r/GUI/filamentsync/FilamentData.hpp b/src/slic3r/GUI/filamentsync/FilamentData.hpp
+index 41733da77..c93b3c635 100644
+--- a/src/slic3r/GUI/filamentsync/FilamentData.hpp
++++ b/src/slic3r/GUI/filamentsync/FilamentData.hpp
+@@ -26,6 +26,7 @@ struct FilamentData
+     unsigned int m_index   = 0;
+     std::string  m_name;
+     std::string  m_type;
++    int          m_spool_id = 0;
+     FilamentColor m_color;
+ };
+ 
