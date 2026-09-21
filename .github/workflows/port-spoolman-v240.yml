@@ -1,0 +1,44 @@
+name: Apply reviewed Spoolman v2.4.0 port
+on:
+  push:
+    branches:
+      - spoolman-v2.4.0
+    paths:
+      - .github/workflows/port-spoolman-v240.yml
+permissions:
+  contents: write
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: spoolman-v2.4.0
+      - name: Apply and check port
+        shell: bash
+        run: |
+          git apply --check .github/patches/spoolman-v240.patch
+          git apply .github/patches/spoolman-v240.patch
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          assert 'set(Snapmaker_VERSION "2.4.0")' in Path('version.inc').read_text()
+          p = Path('src/libslic3r/Preset.cpp').read_text()
+          assert '"filament_flow_support", "spoolman_url", "spoolman_filament_id"' in p
+          t = Path('src/slic3r/GUI/Tab.cpp').read_text()
+          assert 'select_spoolman_line' not in t
+          assert 'append_single_option_line("spoolman_filament_id")' in t
+          assert 'sync_filament_profile_to_spoolman(m_parent, *new_preset)' in t
+          p = Path('src/slic3r/GUI/Plater.cpp').read_text()
+          assert 'Spoolman profile resolved by material/color' in p
+          assert 'syncedData[i].m_spool_id' in p
+          print('Version and Spoolman integration checks passed')
+          PY
+      - name: Commit port
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src
+          git commit -m "Port Spoolman fields and profile sync onto Snapmaker Orca v2.4.0"
+          git push origin HEAD:spoolman-v2.4.0
