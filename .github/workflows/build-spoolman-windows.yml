@@ -1,0 +1,18 @@
+name: Build Snapmaker Orca 2.4.0 Spoolman Edition
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spoolman-v2.4.0
+concurrency:
+  group: spoolman-v240-windows
+  cancel-in-progress: true
+jobs:
+  windows:
+    name: Windows x64
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-2022
+      arch: x64
+      build-deps-only: false
+    secrets: inherit
