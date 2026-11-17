@@ -40,6 +40,7 @@ struct ConnectMachineInfo
     std::vector<std::string> multiColors;
     Slic3r::FilamentColorMode colorMode { Slic3r::FilamentColorMode::Segment };
     int index {0};
+    int spool_id {0};
 };
 
 namespace Slic3r {

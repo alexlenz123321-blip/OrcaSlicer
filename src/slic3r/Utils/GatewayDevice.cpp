@@ -238,6 +238,8 @@ bool GatewayDevice::parse_machine_slots(const nlohmann::json& result, std::vecto
     const nlohmann::json* exists       = find_array(config, "filament_exist");
     const nlohmann::json* multi_colors = find_array(config, "filament_color_multi");
 
+    const nlohmann::json* spool_ids = find_array(config, "filament_spool_id");
+
     std::vector<ConnectMachineInfo> parsed;
     parsed.reserve(count);
     for (size_t index = 0; index < count; ++index) {
@@ -252,6 +254,11 @@ bool GatewayDevice::parse_machine_slots(const nlohmann::json& result, std::vecto
 
         ConnectMachineInfo slot;
         slot.index         = static_cast<int>(index);
+        if (filament_exists && spool_ids != nullptr && index < spool_ids->size() && (*spool_ids)[index].is_number_integer()) {
+            const auto spool_id = (*spool_ids)[index].get<std::int64_t>();
+            if (spool_id > 0 && spool_id <= std::numeric_limits<int>::max())
+                slot.spool_id = static_cast<int>(spool_id);
+        }
         const std::string sub_type = array_string(sub_types ? *sub_types : nlohmann::json::array(), index, "NONE");
         slot.filament_info         = filament_exists ? machine_filament_display_name(vendor, type, sub_type) : "NONE";
         slot.filament_type = type;
@@ -312,7 +319,7 @@ bool GatewayDevice::machine_slots_equal(const std::vector<ConnectMachineInfo>& l
     for (size_t index = 0; index < left.size(); ++index) {
         const ConnectMachineInfo& lhs = left[index];
         const ConnectMachineInfo& rhs = right[index];
-        if (lhs.index != rhs.index || lhs.filament_info != rhs.filament_info || lhs.filament_type != rhs.filament_type ||
+        if (lhs.index != rhs.index || lhs.spool_id != rhs.spool_id || lhs.filament_info != rhs.filament_info || lhs.filament_type != rhs.filament_type ||
             lhs.nozzle_info != rhs.nozzle_info || lhs.nozzle_volume_type != rhs.nozzle_volume_type || lhs.color_info != rhs.color_info ||
             lhs.multiColors != rhs.multiColors || lhs.colorMode != rhs.colorMode)
             return false;

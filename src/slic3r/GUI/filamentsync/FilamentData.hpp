@@ -26,6 +26,7 @@ struct FilamentData
     unsigned int m_index   = 0;
     std::string  m_name;
     std::string  m_type;
+    int          m_spool_id = 0;
     FilamentColor m_color;
 };
 
