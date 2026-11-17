@@ -1321,7 +1321,7 @@ wxWindow* PreferencesDialog::create_general_page()
     auto spoolman_label = new wxStaticText(page, wxID_ANY, _L("Server URL"));
     spoolman_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
     spoolman_label->SetFont(Label::Body_13);
-    auto spoolman_input = new TextInput(page, wxEmptyString, wxEmptyString, wxEmptyString,
+    auto spoolman_input = new ::TextInput(page, wxEmptyString, wxEmptyString, wxEmptyString,
                                        wxDefaultPosition, wxSize(FromDIP(300), -1), wxTE_PROCESS_ENTER);
     auto spoolman_text = spoolman_input->GetTextCtrl();
     spoolman_text->SetValue(wxString::FromUTF8(app_config->get("spoolman_server_url")));
