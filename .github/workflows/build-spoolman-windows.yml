@@ -1,5 +1,5 @@
 name: Build Snapmaker Orca 2.4.1 Spoolman Edition
-run-name: Snapmaker Orca 2.4.1 Spoolman Windows installer
+run-name: Build Snapmaker Orca 2.4.1 with Spoolman server settings
 on:
   workflow_dispatch:
   push:
