@@ -1,0 +1,50 @@
+name: Build Snapmaker Filament Library
+run-name: Build Windows filament library app
+on:
+  workflow_dispatch:
+  push:
+    branches: [filament-library-app]
+    paths:
+      - 'tools/filament-library/**'
+      - '.github/workflows/build-filament-library.yml'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: tools/filament-library
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run core tests
+        run: python -m unittest -v
+      - name: Test desktop startup
+        run: python app.py --smoke-test
+      - name: Install packager
+        run: python -m pip install pyinstaller==6.11.1
+      - name: Build Windows EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name Snapmaker-Filament-Library --add-data "catalog.json.gz;." --add-data "LICENSE-OFD.txt;." app.py
+      - name: Test packaged app startup
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath '.\dist\Snapmaker-Filament-Library.exe' -ArgumentList '--smoke-test' -PassThru
+          if (-not $app.WaitForExit(60000)) { $app.Kill(); throw 'Packaged app startup timed out' }
+          if ($app.ExitCode -ne 0) { throw "Packaged app failed: $($app.ExitCode)" }
+      - name: Package download
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/Anleitung.md
+          Copy-Item LICENSE-OFD.txt dist/LICENSE-OFD.txt
+          Get-FileHash dist/Snapmaker-Filament-Library.exe -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
+          Compress-Archive -Path dist/* -DestinationPath Snapmaker-Filament-Library-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Snapmaker-Filament-Library-Windows
+          path: tools/filament-library/Snapmaker-Filament-Library-Windows.zip
+          if-no-files-found: error
+          retention-days: 90
