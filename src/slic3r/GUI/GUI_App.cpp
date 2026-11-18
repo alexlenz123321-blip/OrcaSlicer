@@ -193,6 +193,21 @@ namespace pt = boost::property_tree;
 namespace Slic3r {
 namespace GUI {
 
+std::string get_spoolman_server_url(const std::string& profile_url)
+{
+    std::string url = wxGetApp().app_config->get("spoolman_server_url");
+    boost::algorithm::trim(url);
+    if (url.empty()) {
+        url = profile_url;
+        boost::algorithm::trim(url);
+    }
+    while (!url.empty() && url.back() == '/')
+        url.pop_back();
+    if (!url.empty() && url.find("://") == std::string::npos)
+        url.insert(0, "http://");
+    return url;
+}
+
 void GUI_App::load_filament_hot_bed_nozzle_relations()
 {
     FilamentHotBedNozzleRules::singleton().load();

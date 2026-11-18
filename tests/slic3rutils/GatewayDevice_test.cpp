@@ -417,3 +417,38 @@ TEST_CASE("GatewayDevice query_machine_info nozzle_volume_type edge cases", "[ga
         REQUIRE(flows.empty());
     }
 }
+
+TEST_CASE("GatewayDevice retains Spoolman spool identity", "[gateway][device][machine-slots][spoolman]")
+{
+    auto objects = machine_objects();
+    objects["print_task_config"]["filament_spool_id"] = {9, 12};
+    std::vector<ConnectMachineInfo> slots;
+    REQUIRE(GatewayDevice::parse_machine_slots(objects, slots));
+    REQUIRE(slots[0].spool_id == 9);
+    REQUIRE(slots[1].spool_id == 12);
+
+    auto changed = slots;
+    changed[0].spool_id = 10;
+    REQUIRE_FALSE(GatewayDevice::machine_slots_equal(slots, changed));
+
+    objects["print_task_config"]["filament_exist"] = {false, true};
+    REQUIRE(GatewayDevice::parse_machine_slots(objects, slots));
+    REQUIRE(slots[0].spool_id == 0);
+    REQUIRE(slots[1].spool_id == 12);
+}
+
+TEST_CASE("GatewayDevice tolerates absent and malformed spool identities", "[gateway][device][machine-slots][spoolman]")
+{
+    auto objects = machine_objects();
+    std::vector<ConnectMachineInfo> slots;
+    REQUIRE(GatewayDevice::parse_machine_slots(objects, slots));
+    REQUIRE(slots[0].spool_id == 0);
+
+    for (const auto& ids : {nlohmann::json::array({-1, "9"}), nlohmann::json::array({nullptr}),
+                           nlohmann::json::array({2147483648LL}), nlohmann::json("invalid")}) {
+        objects["print_task_config"]["filament_spool_id"] = ids;
+        REQUIRE(GatewayDevice::parse_machine_slots(objects, slots));
+        REQUIRE(slots[0].spool_id == 0);
+        REQUIRE(slots[1].spool_id == 0);
+    }
+}

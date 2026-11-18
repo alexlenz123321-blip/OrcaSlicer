@@ -2565,6 +2565,20 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionStrings{L("(Undefined)")});
     def->cli = ConfigOptionDef::nocli;
 
+    def = this->add("spoolman_url", coStrings);
+    def->label = L("Spoolman URL");
+    def->tooltip = L("Optional server for this profile. The Spoolman server in application preferences takes priority.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionStrings{""});
+    def->cli = ConfigOptionDef::nocli;
+
+    def = this->add("spoolman_filament_id", coStrings);
+    def->label = L("Spoolman filament ID (optional)");
+    def->tooltip = L("Select a filament from Spoolman or enter its ID manually. Saving this profile permanently links it to that filament. Leave empty to use automatic name matching.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionStrings{""});
+    def->cli = ConfigOptionDef::nocli;
+
     def = this->add("infill_direction", coFloat);
     def->label = L("Sparse infill direction");
     def->category = L("Strength");

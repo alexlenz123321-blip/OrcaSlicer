@@ -88,6 +88,8 @@ struct PreprintStoreResult;
 
 namespace GUI{
 
+std::string get_spoolman_server_url(const std::string& profile_url = {});
+
 class RemovableDriveManager;
 class OtherInstanceMessageHandler;
 class MainFrame;

@@ -1339,6 +1339,35 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_backup  = create_item_checkbox(_L("Auto-Backup"), page,_L("Backup your project periodically for restoring from the occasional crash."), 50, "backup_switch");
     auto item_backup_interval = create_item_backup_input(_L("every"), page, _L("The period of backup in seconds."), "backup_interval");
 
+    auto title_spoolman = create_item_title(_L("Spoolman"), page, _L("Spoolman"));
+    auto spoolman_row = new wxBoxSizer(wxHORIZONTAL);
+    auto spoolman_label = new wxStaticText(page, wxID_ANY, _L("Server URL"));
+    spoolman_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    spoolman_label->SetFont(Label::Body_13);
+    auto spoolman_input = new ::TextInput(page, wxEmptyString, wxEmptyString, wxEmptyString,
+                                       wxDefaultPosition, wxSize(FromDIP(300), -1), wxTE_PROCESS_ENTER);
+    auto spoolman_text = spoolman_input->GetTextCtrl();
+    spoolman_text->SetValue(wxString::FromUTF8(app_config->get("spoolman_server_url")));
+    spoolman_text->SetHint("http://hostname:7912");
+    spoolman_text->SetToolTip(_L("Spoolman server used for filament sync and profile links. Enter a hostname or IP address and port. This setting takes priority over the server in individual profiles."));
+    auto save_spoolman_url = [this, spoolman_text]() {
+        wxString value = spoolman_text->GetValue();
+        value.Trim(true).Trim(false);
+        app_config->set("spoolman_server_url", into_u8(value));
+        app_config->save();
+    };
+    spoolman_text->Bind(wxEVT_TEXT_ENTER, [save_spoolman_url](wxCommandEvent& event) {
+        save_spoolman_url();
+        event.Skip();
+    });
+    spoolman_text->Bind(wxEVT_KILL_FOCUS, [save_spoolman_url](wxFocusEvent& event) {
+        save_spoolman_url();
+        event.Skip();
+    });
+    spoolman_row->AddSpacer(FromDIP(23));
+    spoolman_row->Add(spoolman_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    spoolman_row->Add(spoolman_input, 0, wxALIGN_CENTER_VERTICAL);
+
     //downloads
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
@@ -1442,6 +1471,8 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_backup, 0, wxTOP,FromDIP(3));
     item_backup->Add(item_backup_interval, 0, wxLEFT, 0);
 
+    sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(spoolman_row, 0, wxEXPAND | wxTOP, FromDIP(3));
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
 
